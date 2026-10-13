@@ -1,9 +1,20 @@
+import { createSignal } from 'solid-js';
 import { Icons } from './Icons';
 
-export default function SearchBar() {
+export default function SearchBar(props) {
+  const [query, setQuery] = createSignal('');
+
   const handleSearch = () => {
-    console.log("Searching for properties...");
-    // Future: add search logic here
+    const text = query().trim();
+    if (props.onSearch) {
+      props.onSearch(text);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      handleSearch();
+    }
   };
 
   return (
@@ -11,7 +22,10 @@ export default function SearchBar() {
       <input 
         type="text" 
         class="search-pill-input" 
-        placeholder="Lokasi, Nama Proyek ..." 
+        placeholder="Lokasi, Nama Proyek, Harga ..." 
+        value={query()}
+        onInput={(e) => setQuery(e.currentTarget.value)}
+        onKeyDown={handleKeyDown}
       />
       <button class="search-pill-btn" onClick={handleSearch}>
         <Icons.Search /> 

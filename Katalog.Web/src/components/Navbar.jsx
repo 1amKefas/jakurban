@@ -5,7 +5,7 @@ export default function Navbar(props) {
   const [isLangOpen, setIsLangOpen] = createSignal(false);
   const [currentLang, setCurrentLang] = createSignal('Bahasa Indonesia');
 
-  const languages = ['Bahasa Indonesia', 'English (US)'];
+  const languages = ['Bahasa Indonesia', 'English'];
 
   return (
     <nav class="navbar">

@@ -1,3 +1,4 @@
+import { For } from 'solid-js';
 import { Icons } from './Icons';
 import logoImg from '../assets/img/jakhome.png';
 
@@ -28,9 +29,9 @@ export default function Footer() {
           <div class="footer-column">
             <h4 class="footer-heading">Perusahaan</h4>
             <ul class="footer-links">
-              {companyLinks.map(link => (
+              <For each={companyLinks}>{(link) => (
                 <li class="footer-link">{link}</li>
-              ))}
+              )}</For>
             </ul>
           </div>
 
@@ -38,9 +39,9 @@ export default function Footer() {
           <div class="footer-column">
             <h4 class="footer-heading">Layanan</h4>
             <ul class="footer-links">
-              {serviceLinks.map(link => (
+              <For each={serviceLinks}>{(link) => (
                 <li class="footer-link">{link}</li>
-              ))}
+              )}</For>
             </ul>
           </div>
 

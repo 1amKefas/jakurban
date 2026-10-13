@@ -3,7 +3,7 @@ import { createStore } from 'solid-js/store';
 import { Icons } from './Icons';
 
 export default function Dashboard(props) {
-  const [adminView, setAdmin, setAdminView] = createSignal('analytics'); 
+  const [adminView, setAdminView] = createSignal('analytics'); 
   const [showAddModal, setShowAddModal] = createSignal(false);
   const [newProp, setNewProp] = createStore({ name: '', price: '', location: '', beds: 0, baths: 0, description: '' });
 
@@ -104,7 +104,7 @@ export default function Dashboard(props) {
                   <textarea rows="3" onInput={(e) => setNewProp('description', e.currentTarget.value)}></textarea>
                 </div>
                 <div style={{ gridColumn: 'span 2', display: 'flex', gap: '10px', "justify-content": 'flex-end' }}>
-                  <button type="button" class="btn-outline" onClick={() => setShowPModal(false)}>Batal</button>
+                  <button type="button" class="btn-outline" onClick={() => setShowAddModal(false)}>Batal</button>
                   <button type="submit" class="btn-primary">Simpan Proyek</button>
                 </div>
               </form>
