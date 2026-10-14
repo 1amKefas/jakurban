@@ -21,7 +21,6 @@ namespace Katalog.Api.Data
 
         public DbSet<Project> Projects { get; set; }
         public DbSet<Property> Properties { get; set; }
-        public DbSet<PropertyUnit> PropertyUnits { get; set; }
         public DbSet<DocumentChunk> DocumentChunks { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
