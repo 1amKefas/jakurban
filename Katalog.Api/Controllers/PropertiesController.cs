@@ -1,81 +1,119 @@
 using Katalog.Api.Data;
-using Katalog.Api.Services;
 using Katalog.Api.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Pgvector;
 
-namespace Katalog.Api.Controllers
+namespace Katalog.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class PropertiesController : ControllerBase
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class PropertiesController : ControllerBase
+    private readonly ApplicationDbContext _context;
+
+    public PropertiesController(ApplicationDbContext context)
     {
-        private readonly ApplicationDbContext _context;
-        private readonly IEmbeddingService _embeddingService;
+        _context = context;
+    }
 
-        public PropertiesController(ApplicationDbContext context, IEmbeddingService embeddingService)
+    // GET: api/properties
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<Property>>> GetProjects()
+    {
+        var projects = await _context.Properties
+            .Include(p => p.Units)
+            .OrderByDescending(p => p.Id)
+            .ToListAsync();
+
+        return Ok(projects);
+    }
+
+    // GET: api/properties/5
+    [HttpGet("{id}")]
+    public async Task<ActionResult<Property>> GetProject(int id)
+    {
+        var project = await _context.Properties
+            .Include(p => p.Units)
+            .FirstOrDefaultAsync(p => p.Id == id);
+
+        if (project == null) return NotFound();
+        return Ok(project);
+    }
+
+    // POST: api/properties
+    [HttpPost]
+    public async Task<ActionResult<Property>> CreateProject([FromBody] Property project)
+    {
+        project.Id = 0;
+        if (project.Units != null)
         {
-            _context = context;
-            _embeddingService = embeddingService;
-        }
-
-        // GET: api/Properties (Untuk ditampilkan di Front-End Solid.JS)
-        [HttpGet]
-        public async Task<ActionResult<IEnumerable<Property>>> GetProperties()
-        {
-            return await _context.Properties.ToListAsync();
-        }
-
-        // POST: api/Properties (Untuk Admin menambahkan properti baru)
-        [HttpPost]
-        public async Task<ActionResult<Property>> PostProperty(Property property)
-        {
-            // 1. Simpan data relasional ke tabel Properties
-            _context.Properties.Add(property);
-            await _context.SaveChangesAsync();
-
-            // 2. Data Chunking & Ingestion
-            string rawContent = $"Unit: {property.UnitCode}, Judul: {property.Title}, Harga: Rp{property.Price:N0}, Status: {property.Status}.";
-
-            // 3. Generate Vector Embedding
-            float[] vectorArray = await _embeddingService.GenerateEmbeddingAsync(rawContent);
-
-            // 4. Simpan ke Vector Database (pgvector)
-            var chunk = new DocumentChunk
+            foreach (var u in project.Units)
             {
-                PropertyId = property.Id,
-                Content = rawContent,
-                Embedding = new Vector(vectorArray)
-            };
-
-            _context.DocumentChunks.Add(chunk);
-            await _context.SaveChangesAsync();
-
-            // =====================================================================
-            // TODO (Fase Integrasi AI): 
-            // Panggil Service Background Task di sini untuk mengonversi 
-            // spesifikasi properti ini menjadi teks (Chunking), lalu mengirimkannya 
-            // ke model Embedding, dan menyimpannya ke tabel DocumentChunks (pgvector).
-            // =====================================================================
-
-            return CreatedAtAction(nameof(GetProperties), new { id = property.Id }, property);
-        }
-
-        // DELETE: api/Properties/5
-        [HttpDelete("{id}")]
-        public async Task<IActionResult> DeleteProperty(Guid id)
-        {
-            var property = await _context.Properties.FindAsync(id);
-            if (property == null)
-            {
-                return NotFound();
+                u.Id = 0;
             }
-
-            _context.Properties.Remove(property);
-            await _context.SaveChangesAsync();
-
-            return NoContent();
         }
+
+        _context.Properties.Add(project);
+        await _context.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetProject), new { id = project.Id }, project);
+    }
+
+    // PUT: api/properties/5
+    [HttpPut("{id}")]
+    public async Task<ActionResult<Property>> UpdateProject(int id, [FromBody] Property updated)
+    {
+        var existing = await _context.Properties
+            .Include(p => p.Units)
+            .FirstOrDefaultAsync(p => p.Id == id);
+
+        if (existing == null) return NotFound();
+
+        existing.Name = updated.Name;
+        existing.Cluster = string.IsNullOrEmpty(updated.Cluster) ? updated.Name : updated.Cluster;
+        existing.Location = updated.Location;
+        existing.Description = updated.Description;
+        existing.Img = updated.Img;
+        existing.Price = updated.Price;
+        existing.Status = updated.Status;
+        existing.Photos = updated.Photos ?? new List<string>();
+        existing.Videos = updated.Videos ?? new List<string>();
+
+        // Update daftar unit di dalam project
+        if (existing.Units.Any())
+        {
+            _context.PropertyUnits.RemoveRange(existing.Units);
+        }
+
+        existing.Units = (updated.Units ?? new List<PropertyUnit>()).Select(u => new PropertyUnit
+        {
+            Name = u.Name,
+            Price = u.Price,
+            LandArea = u.LandArea,
+            BuildArea = u.BuildArea,
+            Beds = u.Beds,
+            Baths = u.Baths,
+            Status = u.Status,
+            Description = u.Description
+        }).ToList();
+
+        await _context.SaveChangesAsync();
+        return Ok(existing);
+    }
+
+    // DELETE: api/properties/5
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteProject(int id)
+    {
+        var existing = await _context.Properties
+            .Include(p => p.Units)
+            .FirstOrDefaultAsync(p => p.Id == id);
+
+        if (existing == null) return NotFound();
+
+        _context.Properties.Remove(existing);
+        await _context.SaveChangesAsync();
+
+        return NoContent();
     }
 }
