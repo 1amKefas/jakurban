@@ -1,16 +1,21 @@
 # 🏢 Rancang Bangun Platform Katalog Properti Terintegrasi Chatbot Berbasis Arsitektur RAG
 
-Sebuah *Centralized Digital Catalog Hub* (Pusat Katalog Digital Terpusat) yang dikembangkan untuk mengatasi fragmentasi data inventaris properti dan mengotomatisasi interaksi pelanggan[cite: 5]. Platform ini dilengkapi dengan asisten virtual 24/7 yang menggunakan arsitektur *Retrieval-Augmented Generation* (RAG) untuk memastikan setiap respons chatbot 100% faktual berdasarkan *knowledge-base* perusahaan[cite: 5].
+Sebuah *Centralized Digital Catalog Hub* (Pusat Katalog Digital Terpusat) yang dikembangkan untuk mengatasi fragmentasi data inventaris properti dan mengotomatisasi interaksi pelanggan. Platform ini dilengkapi dengan asisten virtual 24/7 yang menggunakan arsitektur *Retrieval-Augmented Generation* (RAG) untuk memastikan setiap respons chatbot 100% faktual berdasarkan *knowledge-base* perusahaan.
 
-**Developer:** Kefas Hutabarat (2307413010) - Teknik Informatika[cite: 5]
+**Developer Information:**
+Nama           : Kefas Hutabarat
+Institusi      : Politeknik Negeri Jakart 
+Jurusan        : Teknik Informatika & Komputer
+Program Studi  : Teknik Informatika
+
 
 ## 🛠️ Tech Stack
 Proyek ini mengadopsi arsitektur terpisah (*decoupled*) dengan pendekatan *Monorepo*:
-*   **Back-End:** ASP.NET Core Web API[cite: 5].
-*   **Front-End:** Solid.JS (Reaktivitas tinggi tanpa *Virtual DOM*)[cite: 5].
-*   **Database:** PostgreSQL[cite: 5].
-*   **Vector Database:** `pgvector` (Pencarian semantik / *Cosine Similarity*)[cite: 5].
-*   **AI Orchestrator:** LangChain (Pemrosesan NLP & Pipeline RAG)[cite: 5].
+*   **Back-End:** ASP.NET Core Web API.
+*   **Front-End:** Solid.JS (Reaktivitas tinggi tanpa *Virtual DOM*).
+*   **Database:** PostgreSQL.
+*   **Vector Database:** `pgvector` (Pencarian semantik / *Cosine Similarity*).
+*   **AI Orchestrator:** LangChain (Pemrosesan NLP & Pipeline RAG).
 
 ## 📂 Struktur Proyek
 ```text
