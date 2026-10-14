@@ -2,13 +2,6 @@
 
 Sebuah *Centralized Digital Catalog Hub* (Pusat Katalog Digital Terpusat) yang dikembangkan untuk mengatasi fragmentasi data inventaris properti dan mengotomatisasi interaksi pelanggan. Platform ini dilengkapi dengan asisten virtual 24/7 yang menggunakan arsitektur *Retrieval-Augmented Generation* (RAG) untuk memastikan setiap respons chatbot 100% faktual berdasarkan *knowledge-base* perusahaan.
 
-**Developer Information:**
-Nama           : Kefas Hutabarat
-Institusi      : Politeknik Negeri Jakart 
-Jurusan        : Teknik Informatika & Komputer
-Program Studi  : Teknik Informatika
-
-
 ## 🛠️ Tech Stack
 Proyek ini mengadopsi arsitektur terpisah (*decoupled*) dengan pendekatan *Monorepo*:
 *   **Back-End:** ASP.NET Core Web API.
