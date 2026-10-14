@@ -1,4 +1,4 @@
-# 🏢 Rancang Bangun Platform Katalog Properti Terintegrasi Chatbot Berbasis Arsitektur RAG
+# 🏢 Rancang Bangun Platform Katalog Properti Terintegrasi AI Chatbot Berbasis Arsitektur RAG
 
 Sebuah *Centralized Digital Catalog Hub* (Pusat Katalog Digital Terpusat) yang dikembangkan untuk mengatasi fragmentasi data inventaris properti dan mengotomatisasi interaksi pelanggan. Platform ini dilengkapi dengan asisten virtual 24/7 yang menggunakan arsitektur *Retrieval-Augmented Generation* (RAG) untuk memastikan setiap respons chatbot 100% faktual berdasarkan *knowledge-base* perusahaan.
 
