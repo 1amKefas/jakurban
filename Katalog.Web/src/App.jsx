@@ -255,10 +255,10 @@ function App() {
   const [filters, setFilters] = createSignal({ location: '', priceRange: '', sort: '' });
   const [pendingChatPrompt, setPendingChatPrompt] = createSignal('');
 
+  /* Memeriksa apakah pengguna aktif memiliki otoritas Admin atau Super Admin. */
   const isAdmin = () =>
-    /* Memeriksa apakah pengguna aktif memiliki otoritas Admin atau Super Admin. */
-    currentUser()?.role === 'ADMIN' ||
-    currentUser()?.role === 'SUPER_ADMIN';
+    ['ADMIN', 'SUPER_ADMIN'].includes(user()) ||
+    ['ADMIN', 'SUPER_ADMIN'].includes(currentUser()?.role);
 
   const isPublicView = () => view() !== 'chatbot' && view() !== 'dashboard';
 
