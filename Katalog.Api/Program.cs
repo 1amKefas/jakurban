@@ -31,7 +31,10 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
+        policy.SetIsOriginAllowed(origin =>
+                  origin.StartsWith("http://localhost:") ||
+                  origin.StartsWith("http://127.0.0.1:") ||
+                  origin.EndsWith(".vercel.app"))
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
@@ -55,6 +58,21 @@ builder.Services.AddHttpClient<IEmbeddingService, OpenAiEmbeddingService>(client
 });
 
 var app = builder.Build();
+
+// Auto-inisialisasi ekstensi pgvector & skema tabel pada database Cloud / Staging
+using (var scope = app.Services.CreateScope())
+{
+    try
+    {
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        db.Database.ExecuteSqlRaw("CREATE EXTENSION IF NOT EXISTS vector;");
+        db.Database.EnsureCreated();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Startup DB Check]: {ex.Message}");
+    }
+}
 
 if (app.Environment.IsDevelopment())
 {
