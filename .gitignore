@@ -58,7 +58,6 @@ dist-ssr
 *.mpeg
 *.mpg
 *.zip
-Katalog.Web/src/assets/
 
 # Editor directories and files
 .vscode/*
@@ -71,7 +70,6 @@ Katalog.Web/src/assets/
 *.sln
 *.sw?
 
-src/assets
 *.qodo
 
 Katalog.API/Services/
