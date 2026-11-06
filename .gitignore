@@ -40,24 +40,6 @@ dist-ssr
 *.dump
 *.bak
 
-# Images, logos, and video assets
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.webp
-*.avif
-*.bmp
-*.ico
-*.svg
-*.mp4
-*.mov
-*.avi
-*.mkv
-*.webm
-*.mpeg
-*.mpg
-*.zip
 
 # Editor directories and files
 .vscode/*
