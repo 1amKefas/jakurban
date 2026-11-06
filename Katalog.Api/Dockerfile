@@ -7,7 +7,7 @@ COPY . .
 RUN dotnet publish "Katalog.Api.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
 # Stage 2: Runtime Image yang ringan
-FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
 
