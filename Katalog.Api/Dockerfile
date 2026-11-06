@@ -8,6 +8,12 @@ RUN dotnet publish "Katalog.Api.csproj" -c Release -o /app/publish /p:UseAppHost
 
 # Stage 2: Runtime Image yang ringan
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+
+# Install the missing Kerberos/GSSAPI library required by the database driver
+RUN apt-get update \
+    && apt-get install -y libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /app/publish .
 
