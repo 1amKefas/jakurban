@@ -1,0 +1,29 @@
+:root {
+  /* Tipografi Utama */
+  --font-main: 'Avenir', 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+
+  /* Warna Permukaan & Teks Dasar (Dashboard & Chatbot) */
+  --surface-bg: #f8fafc;
+  --panel-bg: #ffffff;
+  --border-color: #e2e8f0;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+
+  /* Warna Aksen & Interaksi Utama */
+  --primary: #0f172a;
+  --primary-hover: #334155;
+  --accent-blue: #2563eb;
+  --danger: #dc2626;
+
+  /* Indikator Status Semantik (Badge Unit & Log) */
+  --success-bg: #dcfce7;
+  --success-text: #166534;
+  --warning-bg: #fef08a;
+  --warning-text: #854d0e;
+  --danger-bg: #fee2e2;
+  --danger-text: #991b1b;
+
+  /* Radius Sudut Komponen */
+  --radius-md: 10px;
+  --radius-lg: 16px;
+}
