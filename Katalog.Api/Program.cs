@@ -59,14 +59,48 @@ builder.Services.AddHttpClient<IEmbeddingService, OpenAiEmbeddingService>(client
 
 var app = builder.Build();
 
-// Auto-inisialisasi ekstensi pgvector & skema tabel pada database Cloud / Staging
+// Auto-inisialisasi ekstensi pgvector & skema tabel pada database Cloud (Neon.tech)
 using (var scope = app.Services.CreateScope())
 {
     try
     {
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         db.Database.ExecuteSqlRaw("CREATE EXTENSION IF NOT EXISTS vector;");
-        db.Database.EnsureCreated();
+        db.Database.ExecuteSqlRaw(@"
+            CREATE TABLE IF NOT EXISTS ""Projects"" (
+                ""Id"" uuid PRIMARY KEY,
+                ""Name"" text NOT NULL,
+                ""Location"" text NOT NULL DEFAULT '',
+                ""Description"" text NOT NULL DEFAULT '',
+                ""CreatedAt"" timestamp with time zone NOT NULL,
+                ""Photos"" text[] NOT NULL DEFAULT '{}',
+                ""Videos"" text[] NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS ""Properties"" (
+                ""Id"" uuid PRIMARY KEY,
+                ""ProjectId"" uuid NOT NULL REFERENCES ""Projects""(""Id"") ON DELETE CASCADE,
+                ""UnitCode"" text NOT NULL DEFAULT '',
+                ""Title"" text NOT NULL DEFAULT '',
+                ""Price"" numeric NOT NULL DEFAULT 0,
+                ""Status"" text NOT NULL DEFAULT 'Tersedia',
+                ""Description"" text NOT NULL DEFAULT '',
+                ""LandArea"" text NOT NULL DEFAULT '',
+                ""BuildArea"" text NOT NULL DEFAULT '',
+                ""Beds"" integer NOT NULL DEFAULT 0,
+                ""Baths"" integer NOT NULL DEFAULT 0,
+                ""CreatedAt"" timestamp with time zone NOT NULL,
+                ""Photos"" text[] NOT NULL DEFAULT '{}',
+                ""Videos"" text[] NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS ""DocumentChunks"" (
+                ""Id"" uuid PRIMARY KEY,
+                ""PropertyId"" uuid NOT NULL REFERENCES ""Properties""(""Id"") ON DELETE CASCADE,
+                ""Content"" text NOT NULL DEFAULT '',
+                ""Source"" text NOT NULL DEFAULT '',
+                ""Embedding"" vector(1536),
+                ""CreatedAt"" timestamp with time zone NOT NULL
+            );
+        ");
     }
     catch (Exception ex)
     {
