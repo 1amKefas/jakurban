@@ -179,7 +179,7 @@ app.MapGet("/api/auth/accounts", async (ApplicationDbContext db) =>
     return Results.Ok(list);
 });
 
-// POST: /api/auth/login (Proteksi 1 Akun = 1 Sesi Login Aktif)
+// POST: /api/auth/login (Skema Last-In Wins: Login baru selalu diizinkan & otomatis menggugurkan sesi perangkat lama)
 app.MapPost("/api/auth/login", async (ApplicationDbContext db, AuthLoginDto req) =>
 {
     var cleanEmail = (req.Email ?? "").Trim().ToLowerInvariant();
@@ -190,7 +190,7 @@ app.MapPost("/api/auth/login", async (ApplicationDbContext db, AuthLoginDto req)
 
     using var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        SELECT ""Id"", ""Name"", ""Email"", ""Password"", ""Phone"", ""Slug"", ""Role"", ""Title"", ""CreatedAt"", ""ActiveSessionToken"", ""LastActiveAt""
+        SELECT ""Id"", ""Name"", ""Email"", ""Password"", ""Phone"", ""Slug"", ""Role"", ""Title"", ""CreatedAt""
         FROM ""UserAccounts""
         WHERE LOWER(""Email"") = @email AND ""Password"" = @pass
         LIMIT 1;";
@@ -212,27 +212,10 @@ app.MapPost("/api/auth/login", async (ApplicationDbContext db, AuthLoginDto req)
     var role = reader.GetString(6);
     var title = reader.IsDBNull(7) ? "" : reader.GetString(7);
     var createdAt = reader.IsDBNull(8) ? "" : reader.GetString(8);
-    var activeToken = reader.IsDBNull(9) ? null : reader.GetString(9);
-    var lastActive = reader.IsDBNull(10) ? (DateTime?)null : reader.GetDateTime(10);
     await reader.CloseAsync();
 
-    // Cek apakah akun sedang aktif digunakan di browser/perangkat lain (dalam 45 detik terakhir)
-    var isCurrentlyLocked = !string.IsNullOrEmpty(activeToken) &&
-                            activeToken != req.SessionToken &&
-                            lastActive.HasValue &&
-                            (DateTime.UtcNow - lastActive.Value.ToUniversalTime()).TotalSeconds < 45;
-
-    if (isCurrentlyLocked)
-    {
-        return Results.Json(new
-        {
-            message = "Akun ini sedang aktif digunakan di browser/perangkat lain! Silakan keluar (Logout) terlebih dahulu pada perangkat tersebut."
-        }, statusCode: 409);
-    }
-
-    var newSessionToken = string.IsNullOrWhiteSpace(req.SessionToken)
-        ? Guid.NewGuid().ToString("N")
-        : req.SessionToken;
+    // Selalu buat token sesi baru untuk menimpa sesi lama (Last-In Wins)
+    var newSessionToken = Guid.NewGuid().ToString("N");
 
     using var updateCmd = conn.CreateCommand();
     updateCmd.CommandText = @"UPDATE ""UserAccounts"" SET ""ActiveSessionToken"" = @token, ""LastActiveAt"" = @now WHERE ""Id"" = @id;";

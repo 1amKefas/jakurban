@@ -249,7 +249,7 @@ function App() {
   const [showLogoutModal, setShowLogoutModal] = createSignal(false);
   const [loginForm, setLoginForm] = createStore({ email: '', password: '' });
   const [clusters, setClustersState] = createSignal(
-    loadStored('jakurban_cached_clusters', INITIAL_CLUSTERS).map(computeProjectSummary)
+    loadStored('jakurban_cached_clusters', []).map(computeProjectSummary)
   );
   const [searchQuery, setSearchQuery] = createSignal('');
   const [filters, setFilters] = createSignal({ location: '', priceRange: '', sort: '' });
@@ -429,39 +429,76 @@ function App() {
     };
     window.addEventListener('storage', handleStorageSync);
 
-    // Lepaskan kunci sesi secara otomatis jika tab/browser ditutup langsung
-    const handlePageHide = () => {
+    // Fungsi verifikasi sesi aktif (Last-In Wins)
+    let isKickingSession = false;
+    const verifyActiveSession = async () => {
       const active = currentUser();
-      if (active?.email && active?.sessionToken) {
-        apiService.logoutAccount(active.email, active.sessionToken);
+      if (!active?.email || isKickingSession) return;
+
+      // Jika sesi lama di localStorage belum memiliki sessionToken dari server, paksa login ulang
+      if (!active.sessionToken) {
+        setUser(null);
+        setCurrentUser(null);
+        if (view() === 'dashboard') setView('catalog');
+        return;
+      }
+
+      try {
+        const status = await apiService.sendSessionHeartbeat?.(active.email, active.sessionToken);
+        if (status && status.kicked) {
+          isKickingSession = true;
+          setShowLogoutModal(false);
+          setUser(null);
+          setCurrentUser(null);
+          setView('catalog');
+          alert('Sesi Anda di perangkat ini telah berakhir karena akun Anda baru saja login di perangkat atau browser lain.');
+          isKickingSession = false;
+        }
+      } catch {
+        // Abaikan jika jaringan sedang offline sementara
       }
     };
-    window.addEventListener('pagehide', handlePageHide);
 
-    // Heartbeat setiap 15 detik selama sedang login
-    const heartbeatTimer = setInterval(async () => {
-      const active = currentUser();
-      if (active?.email && active?.sessionToken) {
-        try {
-          const isValid = await apiService.sendSessionHeartbeat(active.email, active.sessionToken);
-          if (!isValid) {
-            setUser(null);
-            setCurrentUser(null);
-            setView('catalog');
-            alert('Sesi Anda telah berakhir atau dicabut dari server.');
-          }
-        } catch {
-          // Abaikan jika jaringan sedang offline sementara
-        }
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        verifyActiveSession();
       }
-    }, 15000);
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    // Cek langsung saat pertama kali buka halaman & setiap 5 detik
+    verifyActiveSession();
+    const heartbeatTimer = setInterval(verifyActiveSession, 5000);
 
     onCleanup(() => {
       window.removeEventListener('popstate', handlePopState);
       window.removeEventListener('storage', handleStorageSync);
-      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       clearInterval(heartbeatTimer);
     });
+
+    recordVisitorCatalogView();
+
+    try {
+      const serverProjects = await apiService.getProjects();
+      if (Array.isArray(serverProjects)) {
+        setClusters(serverProjects);
+      }
+    } catch (err) {
+      console.warn('Menggunakan katalog lokal sementara (API belum aktif):', err.message);
+    }
+
+    try {
+      const serverAccounts = await apiService.getAccounts?.();
+      if (Array.isArray(serverAccounts) && serverAccounts.length > 0) {
+        updateAccounts(serverAccounts);
+      }
+    } catch {
+      // Gunakan daftar akun lokal jika endpoint accounts belum terjangkau
+    }
 
     recordVisitorCatalogView();
 
@@ -598,8 +635,7 @@ function App() {
     const passInput = (loginForm.password || '').trim();
 
     try {
-      const existingToken = currentUser()?.sessionToken || null;
-      const loggedInAccount = await apiService.loginAccount(emailInput, passInput, existingToken);
+      const loggedInAccount = await apiService.loginAccount(emailInput, passInput);
 
       setCurrentUser(loggedInAccount);
       setUser(loggedInAccount.role);
@@ -617,22 +653,11 @@ function App() {
       );
       setView('dashboard');
     } catch (err) {
-      if (err.status === 409 || err.status === 401) {
+      if (err.status === 401) {
         alert(err.message);
         return;
       }
-      // Fallback lokal hanya jika server sedang offline
-      const matchedAccount = accounts().find(
-        (acc) => acc.email.toLowerCase() === emailInput && acc.password === passInput
-      );
-      if (matchedAccount) {
-        setCurrentUser(matchedAccount);
-        setUser(matchedAccount.role);
-        setShowLogin(false);
-        setView('dashboard');
-      } else {
-        alert('Kredensial tidak valid. Pastikan email dan password sesuai dengan yang terdaftar.');
-      }
+      alert('Gagal terhubung ke server autentikasi. Pastikan server backend sedang aktif.');
     }
   };
 
@@ -736,6 +761,7 @@ function App() {
         <Show when={view() === 'detail' && selectedProperty()}>
           <PropertyDetail
             property={selectedProperty()}
+            accounts={accounts()}
             setView={setView}
             onAskChatbot={handleOpenChatWithPrompt}
             onSelectUnit={(unit) => {
@@ -751,6 +777,7 @@ function App() {
           <UnitDetail
             unit={selectedUnit()}
             project={selectedProperty()}
+            accounts={accounts()}
             onBack={() => setView('detail')}
             setView={setView}
             onAskChatbot={handleOpenChatWithPrompt}

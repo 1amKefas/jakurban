@@ -497,5 +497,69 @@ export const apiService = {
       errorPrefix: 'Gagal menghapus dokumen Knowledge Base'
     });
     return await res.json();
+  },
+
+  /** Mengambil daftar akun tim dari PostgreSQL agar tersinkronisasi di semua browser. */
+  async getAccounts() {
+    const res = await requestApi('/auth/accounts', {
+      errorPrefix: 'Gagal memuat daftar akun'
+    });
+    return await res.json();
+  },
+
+  /** Login dengan skema Last-In Wins (mengambil alih sesi aktif & mengeluarkan perangkat lama). */
+  async loginAccount(email, password) {
+    const res = await fetch(`${API_BASE_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.message || `Gagal login (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  },
+
+  /** Mengecek apakah token sesi di browser ini masih menjadi sesi terakhir yang sah di server. */
+  async sendSessionHeartbeat(email, sessionToken) {
+    const res = await fetch(`${API_BASE_URL}/auth/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, sessionToken })
+    });
+    if (res.status === 401) return { valid: false, kicked: true };
+    return { valid: res.ok, kicked: false };
+  },
+
+  /** Melepaskan token sesi di server saat pengguna klik Logout. */
+  async logoutAccount(email, sessionToken) {
+    await fetch(`${API_BASE_URL}/auth/logout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, sessionToken }),
+      keepalive: true
+    }).catch(() => {});
+  },
+
+  /** Menyimpan atau memperbarui kredensial akun tim di PostgreSQL. */
+  async saveAccount(accountPayload) {
+    const res = await requestApi('/auth/accounts', {
+      method: 'POST',
+      body: accountPayload,
+      errorPrefix: 'Gagal menyimpan akun'
+    });
+    return await res.json();
+  },
+
+  /** Menghapus kredensial akun tim dari PostgreSQL. */
+  async deleteAccount(id) {
+    await requestApi(`/auth/accounts/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      errorPrefix: 'Gagal menghapus akun'
+    });
+    return true;
   }
-};
+};    
