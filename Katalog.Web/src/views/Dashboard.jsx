@@ -510,8 +510,7 @@ export default function Dashboard(props) {
         title: newAccountForm.title || 'Property Agent'
       };
 
-      apiService.saveAccount(updatedAccountObj).catch(() => {});
-      props.setAccounts?.([...(props.accounts || []), createdAccount]);
+      apiService.saveAccount?.(updatedAccountObj).catch(() => {});
       const updatedList = (props.accounts || []).map((acc) =>
         acc.id === targetEditId ? updatedAccountObj : acc
       );
@@ -549,6 +548,7 @@ export default function Dashboard(props) {
         now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
     };
 
+    apiService.saveAccount?.(createdAccount).catch(() => {});
     props.setAccounts?.([...(props.accounts || []), createdAccount]);
     props.addActivityLog?.({
       action: 'CREATE',

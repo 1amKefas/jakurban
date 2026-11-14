@@ -662,6 +662,11 @@ function App() {
     setView('catalog');
   };
 
+  const handleSearch = (query) => {
+    setSearchQuery(query);
+    setView('catalog');
+  };
+
   return (
     <div class="app">
       <Show when={isPublicView()}>
