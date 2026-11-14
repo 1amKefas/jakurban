@@ -72,28 +72,42 @@ public class PropertiesController : ControllerBase
     {
         try
         {
+            // Hanya ambil kolom teks (tanpa Photos & Videos Base64) agar hemat RAM server
             var project = await _context.Projects
-                .Include(p => p.Properties)
                 .AsNoTracking()
-                .FirstOrDefaultAsync(p => p.Id == projectId);
+                .Where(p => p.Id == projectId)
+                .Select(p => new
+                {
+                    p.Id,
+                    p.Name,
+                    p.Location,
+                    p.Description,
+                    Units = p.Properties.Select(u => new
+                    {
+                        u.Id,
+                        u.Title,
+                        u.UnitCode,
+                        u.Price,
+                        u.Status,
+                        u.LandArea,
+                        u.BuildArea,
+                        u.Beds,
+                        u.Baths,
+                        u.Description
+                    }).ToList()
+                })
+                .FirstOrDefaultAsync();
 
             if (project == null) return;
 
-            var propertyIds = project.Properties.Select(u => u.Id).ToList();
-            if (propertyIds.Any())
+            var propertyIds = project.Units.Select(u => u.Id).ToList();
+            if (propertyIds.Count > 0)
             {
-                var oldChunks = await _context.DocumentChunks
-                    .Where(c => propertyIds.Contains(c.PropertyId))
-                    .ToListAsync();
-
-                if (oldChunks.Any())
-                {
-                    await RemoveChunksByUnitIdsAsync(project.Properties.Select(u => u.Id).ToList());
-                    await _context.SaveChangesAsync();
-                }
+                await RemoveChunksByUnitIdsAsync(propertyIds);
+                await _context.SaveChangesAsync();
             }
 
-            foreach (var unit in project.Properties)
+            foreach (var unit in project.Units)
             {
                 var chunkText =
                     $"Proyek/Cluster: {project.Name}. " +
@@ -240,11 +254,12 @@ public class PropertiesController : ControllerBase
         // Trigger Re-Indexing Vector Database (FR-12)
         await SyncProjectDocumentChunksAsync(existing.Id);
 
-        var refreshed = await _context.Projects
-            .Include(p => p.Properties)
-            .FirstOrDefaultAsync(p => p.Id == id);
+        existing.Properties = await _context.Properties
+            .AsNoTracking()
+            .Where(u => u.ProjectId == id)
+            .ToListAsync();
 
-        return Ok(refreshed ?? existing);
+        return Ok(existing);
     }
 
     // DELETE: api/properties/{id}

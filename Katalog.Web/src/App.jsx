@@ -392,7 +392,7 @@ function App() {
       window.history.pushState(
         { view: initialView, propertyId: initPropId, unitId: initUnitId },
         '',
-        buildUrlHash(initialView, initPropId, unitId)
+        buildUrlHash(initialView, initPropId, initUnitId)
       );
     }
 
@@ -416,14 +416,65 @@ function App() {
     };
 
     window.addEventListener('popstate', handlePopState);
-    onCleanup(() => window.removeEventListener('popstate', handlePopState));
+    // Sinkronisasi sesi login antar-tab pada browser yang sama
+    const handleStorageSync = (e) => {
+      if (e.key === 'jakurban_current_user') {
+        const updatedUser = e.newValue ? JSON.parse(e.newValue) : null;
+        setCurrentUser(updatedUser);
+        setUser(updatedUser?.role ?? null);
+        if (!updatedUser && view() === 'dashboard') {
+          setView('catalog');
+        }
+      }
+    };
+    window.addEventListener('storage', handleStorageSync);
+
+    // Lepaskan kunci sesi secara otomatis jika tab/browser ditutup langsung
+    const handlePageHide = () => {
+      const active = currentUser();
+      if (active?.email && active?.sessionToken) {
+        apiService.logoutAccount(active.email, active.sessionToken);
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+
+    // Heartbeat setiap 15 detik selama sedang login
+    const heartbeatTimer = setInterval(async () => {
+      const active = currentUser();
+      if (active?.email && active?.sessionToken) {
+        try {
+          const isValid = await apiService.sendSessionHeartbeat(active.email, active.sessionToken);
+          if (!isValid) {
+            setUser(null);
+            setCurrentUser(null);
+            setView('catalog');
+            alert('Sesi Anda telah berakhir atau dicabut dari server.');
+          }
+        } catch {
+          // Abaikan jika jaringan sedang offline sementara
+        }
+      }
+    }, 15000);
+
+    onCleanup(() => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('storage', handleStorageSync);
+      window.removeEventListener('pagehide', handlePageHide);
+      clearInterval(heartbeatTimer);
+    });
 
     recordVisitorCatalogView();
 
     try {
-      const serverProjects = await apiService.getProjects();
-      if (Array.isArray(serverProjects) && serverProjects.length > 0) {
+      const [serverProjects, serverAccounts] = await Promise.all([
+        apiService.getProjects(),
+        apiService.getAccounts().catch(() => null)
+      ]);
+      if (Array.isArray(serverProjects)) {
         setClusters(serverProjects);
+      }
+      if (Array.isArray(serverAccounts) && serverAccounts.length > 0) {
+        updateAccounts(serverAccounts);
       }
     } catch (err) {
       console.warn('Menggunakan katalog lokal sementara (API belum aktif):', err.message);
@@ -541,33 +592,47 @@ function App() {
     ...new Set((clusters() || []).map((c) => c.location).filter(Boolean))
   ]);
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     const emailInput = (loginForm.email || '').trim().toLowerCase();
     const passInput = (loginForm.password || '').trim();
 
-    const matchedAccount = accounts().find(
-      (acc) => acc.email.toLowerCase() === emailInput && acc.password === passInput
-    );
+    try {
+      const existingToken = currentUser()?.sessionToken || null;
+      const loggedInAccount = await apiService.loginAccount(emailInput, passInput, existingToken);
 
-    if (matchedAccount) {
-      setCurrentUser(matchedAccount);
-      setUser(matchedAccount.role);
+      setCurrentUser(loggedInAccount);
+      setUser(loggedInAccount.role);
       setShowLogin(false);
       addActivityLog(
         {
           action: 'LOGIN',
           category: 'AUTH',
           target: 'Portal Dashboard',
-          details: `${matchedAccount.name} masuk ke sistem sebagai ${
-            matchedAccount.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Admin / Agent'
+          details: `${loggedInAccount.name} masuk ke sistem sebagai ${
+            loggedInAccount.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Admin / Agent'
           }`
         },
-        matchedAccount
+        loggedInAccount
       );
       setView('dashboard');
-    } else {
-      alert('Kredensial tidak valid. Pastikan email dan password sesuai dengan yang terdaftar.');
+    } catch (err) {
+      if (err.status === 409 || err.status === 401) {
+        alert(err.message);
+        return;
+      }
+      // Fallback lokal hanya jika server sedang offline
+      const matchedAccount = accounts().find(
+        (acc) => acc.email.toLowerCase() === emailInput && acc.password === passInput
+      );
+      if (matchedAccount) {
+        setCurrentUser(matchedAccount);
+        setUser(matchedAccount.role);
+        setShowLogin(false);
+        setView('dashboard');
+      } else {
+        alert('Kredensial tidak valid. Pastikan email dan password sesuai dengan yang terdaftar.');
+      }
     }
   };
 
@@ -577,9 +642,10 @@ function App() {
   };
 
   // Eksekusi Logout saat dikonfirmasi di Pop-Up Modal
-  const confirmLogout = () => {
+  const confirmLogout = async () => {
     const activeAccount = currentUser();
     if (activeAccount) {
+      await apiService.logoutAccount(activeAccount.email, activeAccount.sessionToken);
       addActivityLog(
         {
           action: 'LOGOUT',
@@ -593,11 +659,6 @@ function App() {
     setShowLogoutModal(false);
     setUser(null);
     setCurrentUser(null);
-    setView('catalog');
-  };
-
-  const handleSearch = (query) => {
-    setSearchQuery(query);
     setView('catalog');
   };
 

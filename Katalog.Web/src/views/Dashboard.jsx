@@ -260,7 +260,7 @@ export default function Dashboard(props) {
     setIsLoading(true);
     try {
       const data = await apiService.getProjects();
-      if (Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         props.setClusters(data);
       }
       setApiStatus('online');
@@ -497,19 +497,24 @@ export default function Dashboard(props) {
     }
 
     if (targetEditId) {
-      const updatedList = (props.accounts || []).map((acc) =>
-        acc.id === targetEditId
-          ? {
-              ...acc,
-              name: cleanName,
-              email: cleanEmail,
-              password: cleanPassword,
-              role: newAccountForm.role,
-              title: newAccountForm.title || 'Property Agent'
-            }
-          : acc
-      );
+      const existingAcc = (props.accounts || []).find((a) => a.id === targetEditId);
+      const updatedAccountObj = {
+        ...existingAcc,
+        id: targetEditId,
+        name: cleanName,
+        email: cleanEmail,
+        password: cleanPassword,
+        phone: cleanPhone,
+        slug: createAgentSlug(cleanName),
+        role: newAccountForm.role,
+        title: newAccountForm.title || 'Property Agent'
+      };
 
+      apiService.saveAccount(updatedAccountObj).catch(() => {});
+      props.setAccounts?.([...(props.accounts || []), createdAccount]);
+      const updatedList = (props.accounts || []).map((acc) =>
+        acc.id === targetEditId ? updatedAccountObj : acc
+      );
       props.setAccounts?.(updatedList);
       props.addActivityLog?.({
         action: 'UPDATE',
@@ -565,8 +570,8 @@ export default function Dashboard(props) {
     }
     if (!confirm(`Cabut akses login untuk ${acc.name} (${acc.email})?`)) return;
 
-    props.setAccounts?.((props.accounts || []).filter((item) => item.id !== acc.id));
-    props.addActivityLog?.({
+    apiService.deleteAccount(acc.id).catch(() => {});
+    props.setAccounts?.((props.accounts || []).filter((item) => item.id !== acc.id));    props.addActivityLog?.({
       action: 'DELETE',
       category: 'TEAM',
       target: `${acc.name} (${acc.email})`,

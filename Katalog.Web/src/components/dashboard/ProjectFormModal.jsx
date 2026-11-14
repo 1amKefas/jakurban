@@ -590,11 +590,6 @@ export default function ProjectFormModal(props) {
       return;
     }
 
-    if (!Array.isArray(props.projectForm.videos) || props.projectForm.videos.length === 0) {
-      alert('Wajib mengunggah atau menambahkan minimal 1 Video Project!');
-      return;
-    }
-
     if (!Array.isArray(props.projectForm.units) || props.projectForm.units.length === 0) {
       alert('Wajib menambahkan minimal 1 Tipe Unit ke dalam daftar project sebelum menyimpan!');
       return;
