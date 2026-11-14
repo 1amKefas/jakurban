@@ -1,7 +1,13 @@
 import { DEFAULT_COVER_IMG } from '../constants/defaultData';
 import { isValidGuid } from '../utils/formatters';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5151/api';
+const isLocalhost =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (isLocalhost ? 'http://localhost:5151/api' : 'https://jakurban.onrender.com/api');
 const SESSION_STORAGE_KEY = 'jakurban_chat_session_uuid';
 const MAP_STORAGE_KEY = 'jakurban_custom_maps';
 
