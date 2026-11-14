@@ -12,7 +12,7 @@ import {
   DEFAULT_THUMB_IMG,
   createDefaultProjectForm
 } from '../constants/defaultData';
-import { getStatusColor } from '../utils/formatters';
+import { getStatusColor, isValidGuid } from '../utils/formatters';
 import ProjectFormModal from '../components/dashboard/ProjectFormModal';
 import '../styles/dashboard.css';
 import KnowledgeBaseManager from '../components/dashboard/KnowledgeBaseManager';
@@ -375,7 +375,8 @@ export default function Dashboard(props) {
       });
 
     try {
-      const responseData = editingMode
+      const hasServerGuid = editingMode && isValidGuid(projectForm.id);
+      const responseData = hasServerGuid
         ? await apiService.updateProject(projectForm.id, rawPayload)
         : await apiService.createProject(rawPayload);
 

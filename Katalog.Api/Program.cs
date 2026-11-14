@@ -117,6 +117,15 @@ if (app.Environment.IsDevelopment())
 app.UseRouting();
 app.UseCors("AllowFrontend");
 app.UseAuthorization();
+
+// Endpoint status utama agar membuka https://jakurban.onrender.com/ tidak menampilkan 404
+app.MapGet("/", () => Results.Ok(new
+{
+    status = "online",
+    service = "JakUrban Catalog & RAG Chatbot API",
+    endpoints = new[] { "/api/properties", "/api/chat" }
+}));
+
 app.MapControllers();
 
 app.Run();

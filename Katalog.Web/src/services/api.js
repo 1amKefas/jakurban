@@ -5,6 +5,13 @@ const isLocalhost =
   typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
+// Bersihkan otomatis jika VITE_API_URL tidak sengaja mengandung kurung siku Markdown [...] atau tanda kutip
+const rawEnvUrl = String(import.meta.env.VITE_API_URL || '').trim();
+const cleanEnvUrl = rawEnvUrl
+  .replace(/^\[([^\]]+)\]\([^)]+\)$/, '$1')
+  .replace(/^[\["']+|[\]"']+$/g, '')
+  .replace(/\/+$/, '');
+
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (isLocalhost ? 'http://localhost:5151/api' : 'https://jakurban.onrender.com/api');
