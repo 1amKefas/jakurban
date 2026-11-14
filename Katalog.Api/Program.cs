@@ -73,8 +73,8 @@ using (var scope = app.Services.CreateScope())
                 ""Location"" text NOT NULL DEFAULT '',
                 ""Description"" text NOT NULL DEFAULT '',
                 ""CreatedAt"" timestamp with time zone NOT NULL,
-                ""Photos"" text[] NOT NULL DEFAULT '{}',
-                ""Videos"" text[] NOT NULL DEFAULT '{}'
+                ""Photos"" text[] NOT NULL DEFAULT ARRAY[]::text[],
+                ""Videos"" text[] NOT NULL DEFAULT ARRAY[]::text[]
             );
             CREATE TABLE IF NOT EXISTS ""Properties"" (
                 ""Id"" uuid PRIMARY KEY,
@@ -89,8 +89,8 @@ using (var scope = app.Services.CreateScope())
                 ""Beds"" integer NOT NULL DEFAULT 0,
                 ""Baths"" integer NOT NULL DEFAULT 0,
                 ""CreatedAt"" timestamp with time zone NOT NULL,
-                ""Photos"" text[] NOT NULL DEFAULT '{}',
-                ""Videos"" text[] NOT NULL DEFAULT '{}'
+                ""Photos"" text[] NOT NULL DEFAULT ARRAY[]::text[],
+                ""Videos"" text[] NOT NULL DEFAULT ARRAY[]::text[]
             );
             CREATE TABLE IF NOT EXISTS ""DocumentChunks"" (
                 ""Id"" uuid PRIMARY KEY,
