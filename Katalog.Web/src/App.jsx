@@ -443,6 +443,9 @@ function App() {
         return;
       }
 
+      // Abaikan pengecekan kick jika sedang memakai token fallback lokal sementara
+      if (String(active.sessionToken).startsWith('local-')) return;
+
       try {
         const status = await apiService.sendSessionHeartbeat?.(active.email, active.sessionToken);
         if (status && status.kicked) {
@@ -498,23 +501,6 @@ function App() {
       }
     } catch {
       // Gunakan daftar akun lokal jika endpoint accounts belum terjangkau
-    }
-
-    recordVisitorCatalogView();
-
-    try {
-      const [serverProjects, serverAccounts] = await Promise.all([
-        apiService.getProjects(),
-        apiService.getAccounts().catch(() => null)
-      ]);
-      if (Array.isArray(serverProjects)) {
-        setClusters(serverProjects);
-      }
-      if (Array.isArray(serverAccounts) && serverAccounts.length > 0) {
-        updateAccounts(serverAccounts);
-      }
-    } catch (err) {
-      console.warn('Menggunakan katalog lokal sementara (API belum aktif):', err.message);
     }
   });
 
@@ -653,11 +639,40 @@ function App() {
       );
       setView('dashboard');
     } catch (err) {
+      // Jika server eksplisit menolak karena email/password salah (HTTP 401)
       if (err.status === 401) {
         alert(err.message);
         return;
       }
-      alert('Gagal terhubung ke server autentikasi. Pastikan server backend sedang aktif.');
+
+      // Fallback otomatis jika Render sedang deploy / cold-start
+      const matchedAccount = accounts().find(
+        (acc) => acc.email.toLowerCase() === emailInput && acc.password === passInput
+      );
+
+      if (matchedAccount) {
+        const accountWithToken = {
+          ...matchedAccount,
+          sessionToken: `local-${Date.now()}`
+        };
+        setCurrentUser(accountWithToken);
+        setUser(accountWithToken.role);
+        setShowLogin(false);
+        addActivityLog(
+          {
+            action: 'LOGIN',
+            category: 'AUTH',
+            target: 'Portal Dashboard',
+            details: `${accountWithToken.name} masuk ke sistem sebagai ${
+              accountWithToken.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Admin / Agent'
+            }`
+          },
+          accountWithToken
+        );
+        setView('dashboard');
+      } else {
+        alert('Kredensial tidak valid. Pastikan email dan password sesuai dengan yang terdaftar.');
+      }
     }
   };
 

@@ -332,4 +332,14 @@ app.Run();
 
 public record AuthLoginDto(string Email, string Password, string? SessionToken);
 public record AuthSessionDto(string Email, string? SessionToken);
-public record UserAccountDto(string Id, string Name, string Email, string Password, string? Phone, string? Slug, string Role, string? Title, string? CreatedAt);
+public record UserAccountDto(
+    string Id = "",
+    string Name = "",
+    string Email = "",
+    string Password = "",
+    string? Phone = "",
+    string? Slug = "",
+    string Role = "ADMIN",
+    string? Title = "Property Agent",
+    string? CreatedAt = ""
+);
