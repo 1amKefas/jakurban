@@ -498,6 +498,10 @@ export default function Dashboard(props) {
 
     if (targetEditId) {
       const existingAcc = (props.accounts || []).find((a) => a.id === targetEditId);
+      const preservedSlug =
+        existingAcc?.slug && existingAcc?.name?.trim().toLowerCase() === cleanName.toLowerCase()
+          ? existingAcc.slug
+          : createAgentSlug(cleanName);
       const updatedAccountObj = {
         ...existingAcc,
         id: targetEditId,
@@ -505,7 +509,7 @@ export default function Dashboard(props) {
         email: cleanEmail,
         password: cleanPassword,
         phone: cleanPhone,
-        slug: createAgentSlug(cleanName),
+        slug: preservedSlug,
         role: newAccountForm.role,
         title: newAccountForm.title || 'Property Agent'
       };
@@ -613,7 +617,11 @@ export default function Dashboard(props) {
 
   const filteredLogs = createMemo(() => {
     let logs = props.activityLogs || [];
-    if (logFilter() === 'CRUD') {
+
+    // Sesuai FR-13: Admin biasa hanya melihat log CRUD Proyek & Unit
+    if (!isSuperAdmin()) {
+      logs = logs.filter((l) => l.category === 'PROJECT' || l.category === 'UNIT');
+    } else if (logFilter() === 'CRUD') {
       logs = logs.filter((l) => l.category === 'PROJECT' || l.category === 'UNIT');
     } else if (logFilter() !== 'ALL') {
       logs = logs.filter((l) => l.category === logFilter());
@@ -623,8 +631,13 @@ export default function Dashboard(props) {
     const toStr = logDateTo();
 
     if (fromStr || toStr) {
-      const fromDate = fromStr ? new Date(`${fromStr}T00:00:00`) : null;
-      const toDate = toStr ? new Date(`${toStr}T23:59:59`) : null;
+      const rawFrom = fromStr ? new Date(`${fromStr}T00:00:00`) : null;
+      const rawTo = toStr ? new Date(`${toStr}T23:59:59`) : null;
+
+      // Antisipasi jika user menginput tanggal "Dari" lebih besar daripada "Sampai"
+      const isInverted = rawFrom && rawTo && rawFrom > rawTo;
+      const fromDate = isInverted ? new Date(`${toStr}T00:00:00`) : rawFrom;
+      const toDate = isInverted ? new Date(`${fromStr}T23:59:59`) : rawTo;
 
       logs = logs.filter((l) => {
         const logDate = parseLogTimestampDate(l.timestamp);
@@ -1161,28 +1174,31 @@ export default function Dashboard(props) {
                 Transparansi operasional penuh — seluruh Super Admin dan Admin dapat memantau riwayat CRUD & autentikasi secara real-time.
               </p>
             </div>
-            <div class="log-filter-pills">
-              <For
-                each={[
-                  { key: 'ALL', label: `Semua (${(props.activityLogs || []).length})` },
-                  { key: 'CRUD', label: 'Proyek & Unit' },
-                  { key: 'TEAM', label: 'Tim & Akses' },
-                  { key: 'AUTH', label: 'Sesi Login' }
-                ]}
-              >
-                {(item) => (
-                  <button
-                    class={`filter-pill-btn ${logFilter() === item.key ? 'active' : ''}`}
-                    onClick={() => {
-                      setLogFilter(item.key);
-                      setLogPage(1);
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                )}
-              </For>
-            </div>
+            <Show when={isSuperAdmin()}>
+              <div class="log-filter-pills">
+                <For
+                  each={[
+                    { key: 'ALL', label: `Semua (${(props.activityLogs || []).length})` },
+                    { key: 'CRUD', label: 'Proyek & Unit' },
+                    { key: 'KNOWLEDGE', label: 'Knowledge AI' },
+                    { key: 'TEAM', label: 'Tim & Akses' },
+                    { key: 'AUTH', label: 'Sesi Login' }
+                  ]}
+                >
+                  {(item) => (
+                    <button
+                      class={`filter-pill-btn ${logFilter() === item.key ? 'active' : ''}`}
+                      onClick={() => {
+                        setLogFilter(item.key);
+                        setLogPage(1);
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
           </div>
 
           {/* FILTER RANGE TANGGAL LOG AKTIVITAS */}
@@ -1192,6 +1208,7 @@ export default function Dashboard(props) {
               <input
                 type="date"
                 value={logDateFrom()}
+                max={logDateTo() || undefined}
                 onInput={(e) => {
                   setLogDateFrom(e.currentTarget.value);
                   setLogPage(1);
@@ -1203,6 +1220,7 @@ export default function Dashboard(props) {
               <input
                 type="date"
                 value={logDateTo()}
+                min={logDateFrom() || undefined}
                 onInput={(e) => {
                   setLogDateTo(e.currentTarget.value);
                   setLogPage(1);
@@ -1526,6 +1544,7 @@ export default function Dashboard(props) {
                               >
                                 <SvgIcon.Trash />
                               </button>
+                            </Show>
                               <button
                                 type="button"
                                 class="btn-sm-outline"
@@ -1538,7 +1557,6 @@ export default function Dashboard(props) {
                               >
                                 🔗 Link URL Agent
                               </button>
-                            </Show>
                           </td>
                         </tr>
                       );

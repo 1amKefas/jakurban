@@ -1,8 +1,95 @@
-import { createSignal, onMount, For, Show } from 'solid-js';
+import { createSignal, onMount, For } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { apiService } from '../../services/api';
 
-// Ekstraktor otomatis isi teks dari file Word (.docx XML), CSV/Excel, atau TXT langsung di browser
+const PDFJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+const PDFJS_WORKER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let pdfJsPromise = null;
+function loadPdfJs() {
+  if (typeof window !== 'undefined' && window.pdfjsLib) {
+    return Promise.resolve(window.pdfjsLib);
+  }
+  if (pdfJsPromise) return pdfJsPromise;
+
+  pdfJsPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = PDFJS_CDN;
+    script.onload = () => {
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+        resolve(window.pdfjsLib);
+      } else {
+        reject(new Error('pdfjsLib gagal dimuat'));
+      }
+    };
+    script.onerror = () => reject(new Error('Gagal memuat library PDF.js'));
+    document.head.appendChild(script);
+  });
+  return pdfJsPromise;
+}
+
+// Helper membaca dan mendekompresi entry XML dari file arsip ZIP (.docx / .xlsx)
+async function extractZipXmlEntries(buffer, targetPredicate) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  const results = {};
+
+  let offset = 0;
+  while (offset + 30 <= bytes.length) {
+    if (view.getUint32(offset, true) !== 0x04034b50) {
+      offset++;
+      continue;
+    }
+
+    const compressionMethod = view.getUint16(offset + 8, true);
+    let compressedSize = view.getUint32(offset + 18, true);
+    const fileNameLength = view.getUint16(offset + 26, true);
+    const extraFieldLength = view.getUint16(offset + 28, true);
+    const dataStart = offset + 30 + fileNameLength + extraFieldLength;
+    const entryName = decoder.decode(bytes.subarray(offset + 30, offset + 30 + fileNameLength));
+
+    if (compressedSize === 0) {
+      let scan = dataStart;
+      while (scan + 4 <= bytes.length) {
+        const sig = view.getUint32(scan, true);
+        if (sig === 0x04034b50 || sig === 0x02014b50 || sig === 0x08074b50) break;
+        scan++;
+      }
+      compressedSize = Math.max(0, scan - dataStart);
+    }
+
+    if (targetPredicate(entryName)) {
+      const compressedSlice = bytes.subarray(dataStart, dataStart + compressedSize);
+      let xmlText = '';
+      if (compressionMethod === 0) {
+        xmlText = decoder.decode(compressedSlice);
+      } else if (compressionMethod === 8 && typeof DecompressionStream !== 'undefined') {
+        const ds = new DecompressionStream('deflate-raw');
+        const writer = ds.writable.getWriter();
+        writer.write(compressedSlice).catch(() => {});
+        writer.close().catch(() => {});
+        xmlText = await new Response(ds.readable).text();
+      }
+      if (xmlText) results[entryName] = xmlText;
+    }
+
+    offset = dataStart + compressedSize;
+  }
+
+  return results;
+}
+
+const decodeXmlEntities = (str = '') =>
+  str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+
+// Ekstraktor otomatis isi teks dari file PDF (.pdf), Excel (.xlsx), Word (.docx), CSV, MD, atau TXT
 async function extractTextFromFile(file) {
   const name = file.name.toLowerCase();
 
@@ -10,23 +97,133 @@ async function extractTextFromFile(file) {
     return await file.text();
   }
 
-  // Ekstraksi teks dari struktur dokumen Word (.docx)
-  if (name.endsWith('.docx')) {
-    const buffer = await file.arrayBuffer();
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    const rawStr = decoder.decode(new Uint8Array(buffer));
-    const matches = [...rawStr.matchAll(/<w:t[^>]*>([^<]+)<\/w:t>/g)].map((m) => m[1]);
-    if (matches.length > 0) {
-      return matches.join(' ').replace(/\s+/g, ' ').trim();
+  // 1. Ekstraksi dokumen PDF (.pdf) beserta susunan baris tabel pricelist
+  if (name.endsWith('.pdf')) {
+    try {
+      const pdfjsLib = await loadPdfJs();
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const pageTexts = [];
+
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+
+        // Kelompokkan teks berdasarkan koordinat Y (baris tabel) agar pricelist tetap rapi per baris unit
+        const rowsMap = new Map();
+        for (const item of textContent.items) {
+          const str = (item.str || '').trim();
+          if (!str) continue;
+          const yKey = Math.round((item.transform?.[5] || 0) / 4) * 4;
+          if (!rowsMap.has(yKey)) rowsMap.set(yKey, []);
+          rowsMap.get(yKey).push({ x: item.transform?.[4] || 0, text: str });
+        }
+
+        const sortedRows = [...rowsMap.entries()]
+          .sort((a, b) => b[0] - a[0])
+          .map(([, cols]) =>
+            cols
+              .sort((c1, c2) => c1.x - c2.x)
+              .map((c) => c.text)
+              .join(' | ')
+          );
+
+        if (sortedRows.length > 0) {
+          pageTexts.push(`--- Halaman ${pageNum} ---\n${sortedRows.join('\n')}`);
+        }
+      }
+
+      const combinedPdfText = pageTexts.join('\n\n').trim();
+      if (combinedPdfText) {
+        return combinedPdfText;
+      }
+    } catch (err) {
+      console.warn('Gagal mengekstrak teks PDF:', err);
     }
   }
 
-  return `[Lampiran File: ${file.name} (${Math.round(file.size / 1024)} KB)] — Silakan lengkapi ringkasan isi dokumen/gambar/tabel di bawah ini agar dapat langsung dijawab oleh Chatbot RAG.`;
+  // 2. Ekstraksi dokumen Word (.docx)
+  if (name.endsWith('.docx')) {
+    try {
+      const buffer = await file.arrayBuffer();
+      const entries = await extractZipXmlEntries(buffer, (entry) => entry === 'word/document.xml');
+      const xmlText = entries['word/document.xml'];
+      if (xmlText) {
+        const paragraphs = xmlText
+          .split(/<\/w:p>/i)
+          .map((p) =>
+            [...p.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/gi)]
+              .map((m) => m[1])
+              .join('')
+              .trim()
+          )
+          .filter(Boolean);
+
+        if (paragraphs.length > 0) {
+          return decodeXmlEntities(paragraphs.join('\n'));
+        }
+      }
+    } catch (err) {
+      console.warn('Gagal mengekstrak XML dari .docx:', err);
+    }
+  }
+
+  // 3. Ekstraksi tabel spreadsheet Excel (.xlsx)
+  if (name.endsWith('.xlsx')) {
+    try {
+      const buffer = await file.arrayBuffer();
+      const entries = await extractZipXmlEntries(
+        buffer,
+        (entry) => entry === 'xl/sharedStrings.xml' || /^xl\/worksheets\/sheet\d+\.xml$/i.test(entry)
+      );
+
+      const sharedStrings = [];
+      if (entries['xl/sharedStrings.xml']) {
+        const siBlocks = entries['xl/sharedStrings.xml'].split(/<\/si>/i);
+        for (const block of siBlocks) {
+          const textParts = [...block.matchAll(/<t(?:\s[^>]*)?>([^<]*)<\/t>/gi)].map((m) => m[1]);
+          if (textParts.length > 0) {
+            sharedStrings.push(decodeXmlEntities(textParts.join('')));
+          }
+        }
+      }
+
+      const sheetLines = [];
+      for (const [entryName, sheetXml] of Object.entries(entries)) {
+        if (!entryName.startsWith('xl/worksheets/')) continue;
+        const rows = sheetXml.match(/<row\b[^>]*>[\s\S]*?<\/row>/gi) || [];
+        for (const rowXml of rows) {
+          const cells = rowXml.match(/<c\b[^>]*>[\s\S]*?<\/c>/gi) || [];
+          const rowValues = [];
+          for (const cellXml of cells) {
+            const isShared = /\bt=["']s["']/i.test(cellXml);
+            const inlineStr = cellXml.match(/<t(?:\s[^>]*)?>([^<]*)<\/t>/i);
+            const valMatch = cellXml.match(/<v>([^<]*)<\/v>/i);
+            if (inlineStr) {
+              rowValues.push(decodeXmlEntities(inlineStr[1].trim()));
+            } else if (valMatch) {
+              const rawVal = valMatch[1].trim();
+              const resolved = isShared ? sharedStrings[Number(rawVal)] ?? rawVal : rawVal;
+              if (String(resolved).trim()) rowValues.push(String(resolved).trim());
+            }
+          }
+          if (rowValues.length > 0) {
+            sheetLines.push(rowValues.join(' | '));
+          }
+        }
+      }
+
+      if (sheetLines.length > 0) {
+        return sheetLines.join('\n');
+      }
+    } catch (err) {
+      console.warn('Gagal mengekstrak tabel dari .xlsx:', err);
+    }
+  }
+
+  return '';
 }
 
-/**
- * Memotong teks panjang menjadi cuplikan ringkas untuk tampilan tabel Knowledge Base.
- */
 const truncateSnippet = (text = '', maxLength = 120) => {
   const str = String(text || '');
   return str.length > maxLength ? `${str.slice(0, maxLength)}...` : str;
@@ -35,6 +232,7 @@ const truncateSnippet = (text = '', maxLength = 120) => {
 export default function KnowledgeBaseManager(props) {
   const [docs, setDocs] = createSignal([]);
   const [isSubmitting, setIsSubmitting] = createSignal(false);
+  const [isExtracting, setIsExtracting] = createSignal(false);
   const [form, setForm] = createStore({
     title: '',
     category: 'Aturan KPR & Legalitas',
@@ -60,26 +258,51 @@ export default function KnowledgeBaseManager(props) {
     if (!form.title) {
       setForm('title', file.name.replace(/\.[^/.]+$/, ''));
     }
-    const extracted = await extractTextFromFile(file);
-    setForm('content', extracted);
-    e.currentTarget.value = '';
+
+    setIsExtracting(true);
+    try {
+      const extracted = await extractTextFromFile(file);
+      if (extracted && extracted.trim()) {
+        setForm('content', extracted);
+      } else {
+        setForm('content', '');
+        alert(
+          `File "${file.name}" berupa gambar/scan tanpa lapisan teks digital. Silakan ketik atau tempelkan rincian unit/harga dari brosur tersebut pada kolom Isi Teks di bawah.`
+        );
+      }
+    } finally {
+      setIsExtracting(false);
+      e.currentTarget.value = '';
+    }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!form.title.trim() || !form.content.trim()) {
+    const cleanTitle = form.title.trim();
+    const cleanContent = form.content.trim();
+
+    if (!cleanTitle || !cleanContent) {
       alert('Judul dan Isi Pengetahuan wajib diisi!');
+      return;
+    }
+
+    if (cleanContent.startsWith('[Lampiran File:')) {
+      alert('Isi dokumen masih berupa teks placeholder. Silakan unggah ulang file atau isi rincian teks pengetahuan terlebih dahulu.');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const saved = await apiService.createKnowledgeDoc({ ...form });
+      const saved = await apiService.createKnowledgeDoc({
+        ...form,
+        title: cleanTitle,
+        content: cleanContent
+      });
       setDocs((prev) => [saved, ...prev]);
       props.addActivityLog?.({
         action: 'CREATE',
-        category: 'PROJECT',
-        target: `Knowledge Base AI: ${form.title}`,
+        category: 'KNOWLEDGE',
+        target: `Knowledge Base AI: ${cleanTitle}`,
         details: `Super Admin meng-embed dokumen (${form.fileName || form.category}) ke memori RAG`
       });
       setForm({ title: '', category: 'Aturan KPR & Legalitas', fileName: '', content: '' });
@@ -98,7 +321,7 @@ export default function KnowledgeBaseManager(props) {
     setDocs((prev) => prev.filter((d) => d.id !== doc.id));
     props.addActivityLog?.({
       action: 'DELETE',
-      category: 'PROJECT',
+      category: 'KNOWLEDGE',
       target: `Knowledge Base AI: ${doc.title}`,
       details: 'Super Admin menghapus dokumen dari memori RAG Chatbot'
     });
@@ -110,7 +333,7 @@ export default function KnowledgeBaseManager(props) {
         <div>
           <h1 class="page-title">Knowledge Base AI (Embed Dokumen Perusahaan)</h1>
           <p class="page-subtitle">
-            Otoritas Super Admin — Unggah file Word (.docx), CSV/Excel, Brosur Gambar, atau SOP Perusahaan agar langsung dipahami Chatbot secara instan tanpa reasoning lama.
+            Otoritas Super Admin — Unggah file Pricelist PDF (.pdf), Word (.docx), Excel/CSV (.xlsx/.csv), atau SOP Perusahaan agar seluruh daftar unit & aturan langsung dipahami Chatbot RAG.
           </p>
         </div>
       </div>
@@ -120,22 +343,24 @@ export default function KnowledgeBaseManager(props) {
           <div class="card-section-title">
             <div>
               <h3>Unggah & Embed Dokumen Baru</h3>
-              <p>Teks dari dokumen akan di-embed satu kali ke memori RAG.</p>
+              <p>Teks & tabel dari dokumen akan diekstrak otomatis dan di-embed ke memori RAG.</p>
             </div>
           </div>
 
           <form onSubmit={handleSubmit} class="credential-form">
             <div class="input-group">
-              <label>Pilih File (Word .docx, CSV/Excel, TXT, atau Gambar Brosur)</label>
+              <label>Pilih File (PDF .pdf, Word .docx, Excel .xlsx, CSV, atau TXT)</label>
               <label class="upload-dropzone block-dropzone">
                 <input
                   type="file"
-                  accept=".docx,.csv,.txt,.md,.xlsx,.png,.jpg,.jpeg,.pdf"
+                  accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
                   onChange={handleFileSelect}
                   hidden
                 />
                 <span>
-                  {form.fileName
+                  {isExtracting()
+                    ? 'Mengekstrak isi tabel & teks dari file...'
+                    : form.fileName
                     ? `File Terpilih: ${form.fileName}`
                     : '+ Klik untuk Pilih File dari Perangkat'}
                 </span>
@@ -146,7 +371,7 @@ export default function KnowledgeBaseManager(props) {
               <label>Judul Dokumen / Topik Pengetahuan *</label>
               <input
                 type="text"
-                placeholder="Cth: Syarat Dokumen KPR & Biaya Pajak BPHTB"
+                placeholder="Cth: Pricelist Lengkap Cluster Setiabudi (Semua Unit)"
                 value={form.title}
                 onInput={(e) => setForm('title', e.currentTarget.value)}
                 required
@@ -169,15 +394,19 @@ export default function KnowledgeBaseManager(props) {
             <div class="input-group">
               <label>Isi Teks / Hasil Ekstraksi Dokumen (Siap Di-Embed) *</label>
               <textarea
-                rows="7"
-                placeholder="Isi dokumen yang diekstrak akan muncul di sini. Anda juga dapat menyunting atau menempelkan tabel/aturan penting secara langsung..."
+                rows="8"
+                placeholder="Isi tabel unit, harga, dan teks dokumen yang diekstrak akan muncul otomatis di sini. Anda juga dapat menyuntingnya sebelum disimpan..."
                 value={form.content}
                 onInput={(e) => setForm('content', e.currentTarget.value)}
                 required
               ></textarea>
             </div>
 
-            <button type="submit" class="btn-primary full-width-btn" disabled={isSubmitting()}>
+            <button
+              type="submit"
+              class="btn-primary full-width-btn"
+              disabled={isSubmitting() || isExtracting()}
+            >
               {isSubmitting() ? 'Meng-embed ke RAG...' : 'Simpan & Embed ke Chatbot RAG'}
             </button>
           </form>

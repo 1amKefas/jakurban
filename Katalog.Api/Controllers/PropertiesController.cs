@@ -188,6 +188,7 @@ public class PropertiesController : ControllerBase
 
         _context.Projects.Add(project);
         await _context.SaveChangesAsync();
+        ChatController.InvalidateProjectCache();
 
         await SyncProjectDocumentChunksAsync(project.Id);
 
@@ -250,6 +251,7 @@ public class PropertiesController : ControllerBase
         }
 
         await _context.SaveChangesAsync();
+        ChatController.InvalidateProjectCache();
 
         // Trigger Re-Indexing Vector Database (FR-12)
         await SyncProjectDocumentChunksAsync(existing.Id);
@@ -276,6 +278,7 @@ public class PropertiesController : ControllerBase
 
         _context.Projects.Remove(existing);
         await _context.SaveChangesAsync();
+        ChatController.InvalidateProjectCache();    
 
         return NoContent();
     }

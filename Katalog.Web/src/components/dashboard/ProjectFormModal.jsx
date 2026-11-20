@@ -381,26 +381,52 @@ export default function ProjectFormModal(props) {
     syncLocationString(selectedKota(), kec);
   };
 
+  // Reset state sub-form unit & inisialisasi dropdown wilayah hanya saat modal baru dibuka
+  let wasModalOpen = false;
   createEffect(() => {
-    if (!props.show) return;
-    const loc = (props.projectForm.location || '').toLowerCase();
-    if (!loc) {
-      setSelectedKota('');
-      setSelectedKecamatan('');
+    const isOpen = !!props.show;
+    if (!isOpen) {
+      wasModalOpen = false;
+      setEditingUnitIndex(null);
+      setUnitDraft(createDefaultUnitForm());
+      setPhotoUrlInput('');
+      setVideoUrlInput('');
+      setUnitPhotoUrlInput('');
       return;
     }
 
-    const matchedKota = KOTA_LIST.find((kota) => loc.includes(kota.toLowerCase())) || '';
-    const matchedKec = matchedKota
-      ? JAKARTA_REGIONS[matchedKota].find((kec) => loc.includes(kec.toLowerCase())) || ''
-      : '';
+    if (!wasModalOpen) {
+      wasModalOpen = true;
+      setEditingUnitIndex(null);
+      setUnitDraft(createDefaultUnitForm());
 
-    setSelectedKota(matchedKota);
-    setSelectedKecamatan(matchedKec);
+      const loc = (props.projectForm.location || '').toLowerCase();
+      const matchedKota = KOTA_LIST.find((kota) => loc.includes(kota.toLowerCase())) || '';
+      const matchedKec = matchedKota
+        ? JAKARTA_REGIONS[matchedKota].find((kec) => loc.includes(kec.toLowerCase())) || ''
+        : '';
+
+      setSelectedKota(matchedKota);
+      setSelectedKecamatan(matchedKec);
+    }
   });
 
   const handleProjectInput = (field) => (e) => {
-    props.setProjectForm(field, e.currentTarget.value);
+    const val = e.currentTarget.value;
+    props.setProjectForm(field, val);
+
+    // Jika Admin mengetik manual di kolom lokasi, sinkronkan dropdown hanya jika ditemukan kecocokan baru
+    if (field === 'location') {
+      const loc = val.toLowerCase();
+      const matchedKota = KOTA_LIST.find((kota) => loc.includes(kota.toLowerCase()));
+      if (matchedKota) {
+        setSelectedKota(matchedKota);
+        const matchedKec = JAKARTA_REGIONS[matchedKota].find((kec) =>
+          loc.includes(kec.toLowerCase())
+        );
+        if (matchedKec) setSelectedKecamatan(matchedKec);
+      }
+    }
   };
 
   const handleUnitInput = (field) => (e) => {

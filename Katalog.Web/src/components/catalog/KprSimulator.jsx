@@ -47,14 +47,30 @@ export default function KprSimulator(props) {
     props.selectedUnitId || unitsList()[0]?.id || ''
   );
   const [priceNum, setPriceNum] = createSignal(resolveInitialPrice());
+  const [isEditingPrice, setIsEditingPrice] = createSignal(false);
+  const [rawPriceInput, setRawPriceInput] = createSignal('');
   const [dpPercent, setDpPercent] = createSignal(props.defaultDpPercent ?? 30);
   const [programId, setProgramId] = createSignal(KPR_PROGRAMS[0].id);
   const [tenorYears, setTenorYears] = createSignal(20);
   const [simulatedResult, setSimulatedResult] = createSignal(null);
 
-  const formatInputRupiahText = (num) => {
+  const formatInputRupiahText = (num, preserveExact = false) => {
     if (!num || num <= 0) return '0';
-    const clean = formatCompactRupiah(num).replace(/^Rp\s+/i, '');
+    let clean;
+    if (preserveExact) {
+      if (num >= 1000000000) {
+        const val = Number((num / 1000000000).toFixed(4)).toString().replace('.', ',');
+        clean = `${val} Miliar`;
+      } else if (num >= 1000000) {
+        const val = Number((num / 1000000).toFixed(2)).toString().replace('.', ',');
+        clean = `${val} Juta`;
+      } else {
+        clean = num.toLocaleString('id-ID');
+      }
+    } else {
+      clean = formatCompactRupiah(num).replace(/^Rp\s+/i, '');
+    }
+
     if (isEn()) {
       return clean.replace(/Miliar/gi, 'Billion').replace(/Juta/gi, 'Million');
     }
@@ -62,7 +78,9 @@ export default function KprSimulator(props) {
   };
 
   const dpAmount = createMemo(() => {
-    const pct = Math.min(90, Math.max(0, Number(dpPercent()) || 0));
+    const rawDp = dpPercent();
+    const numericDp = rawDp === '' ? 0 : Number(rawDp);
+    const pct = Math.min(90, Math.max(0, Number.isNaN(numericDp) ? 0 : numericDp));
     return Math.round((priceNum() * pct) / 100);
   });
 
@@ -73,8 +91,10 @@ export default function KprSimulator(props) {
     tenorVal = tenorYears()
   ) => {
     const cleanPrice = Math.max(0, Number(pVal) || 0);
-    const cleanDpPct = Math.min(90, Math.max(0, Number(dpPctVal) || 0));
-    const cleanTenor = Math.min(35, Math.max(1, Number(tenorVal) || 15));
+    const parsedDp = dpPctVal === '' ? 0 : Number(dpPctVal);
+    const cleanDpPct = Math.min(90, Math.max(0, Number.isNaN(parsedDp) ? 0 : parsedDp));
+    const parsedTenor = tenorVal === '' || Number(tenorVal) <= 0 ? 15 : Number(tenorVal);
+    const cleanTenor = Math.min(35, Math.max(1, parsedTenor));
     const prog = KPR_PROGRAMS.find((item) => item.id === progIdVal) || KPR_PROGRAMS[0];
 
     const dpNominal = Math.round((cleanPrice * cleanDpPct) / 100);
@@ -131,11 +151,55 @@ export default function KprSimulator(props) {
     }
   };
 
-  const handlePriceInputChange = (e) => {
-    const parsed = parseSmartRupiahNumber(e.currentTarget.value);
+  const handlePriceFocus = () => {
+    setIsEditingPrice(true);
+    setRawPriceInput(formatInputRupiahText(priceNum(), true));
+  };
+
+  const handlePriceInput = (e) => {
+    const text = e.currentTarget.value;
+    setRawPriceInput(text);
+    const parsed = parseSmartRupiahNumber(text);
     if (parsed > 0) {
       setPriceNum(parsed);
     }
+  };
+
+  const handlePriceBlur = () => {
+    setIsEditingPrice(false);
+    const parsed = parseSmartRupiahNumber(rawPriceInput());
+    if (parsed > 0) {
+      setPriceNum(parsed);
+      runCalculation(parsed, dpPercent(), programId(), tenorYears());
+    }
+  };
+
+  const handleDpInput = (e) => {
+    const raw = e.currentTarget.value;
+    setDpPercent(raw === '' ? '' : Number(raw));
+  };
+
+  const handleDpBlur = () => {
+    const raw = dpPercent();
+    const clamped =
+      raw === '' || Number.isNaN(Number(raw))
+        ? 0
+        : Math.min(90, Math.max(0, Number(raw)));
+    setDpPercent(clamped);
+  };
+
+  const handleTenorInput = (e) => {
+    const raw = e.currentTarget.value;
+    setTenorYears(raw === '' ? '' : Number(raw));
+  };
+
+  const handleTenorBlur = () => {
+    const raw = tenorYears();
+    const clamped =
+      raw === '' || Number(raw) <= 0
+        ? 15
+        : Math.min(35, Math.max(1, Number(raw)));
+    setTenorYears(clamped);
   };
 
   return (
@@ -184,8 +248,11 @@ export default function KprSimulator(props) {
               <input
                 type="text"
                 class="kpr-input-right"
-                value={formatInputRupiahText(priceNum())}
-                onChange={handlePriceInputChange}
+                value={isEditingPrice() ? rawPriceInput() : formatInputRupiahText(priceNum(), true)}
+                onFocus={handlePriceFocus}
+                onInput={handlePriceInput}
+                onBlur={handlePriceBlur}
+                onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
               />
             </div>
           </div>
@@ -196,18 +263,19 @@ export default function KprSimulator(props) {
             <div class="kpr-dp-combined-box">
               <input
                 type="number"
-                min="10"
+                min="0"
                 max="90"
                 class="kpr-dp-pct-input"
                 value={dpPercent()}
-                onInput={(e) => setDpPercent(Number(e.currentTarget.value) || 0)}
+                onInput={handleDpInput}
+                onBlur={handleDpBlur}
               />
               <span class="kpr-dp-divider">%</span>
               <span class="kpr-dp-divider">Rp</span>
               <input
                 type="text"
                 class="kpr-dp-nominal-display"
-                value={formatInputRupiahText(dpAmount())}
+                value={formatInputRupiahText(dpAmount(), true)}
                 readOnly
               />
             </div>
@@ -238,10 +306,11 @@ export default function KprSimulator(props) {
               <input
                 type="number"
                 min="1"
-                max="30"
+                max="35"
                 class="kpr-tenor-input"
                 value={tenorYears()}
-                onInput={(e) => setTenorYears(Number(e.currentTarget.value) || 15)}
+                onInput={handleTenorInput}
+                onBlur={handleTenorBlur}
               />
               <span class="kpr-tenor-suffix">{t('kprYears')}</span>
             </div>
@@ -271,7 +340,11 @@ export default function KprSimulator(props) {
                   <strong>Rp {formatInputRupiahText(res().dpNominal)}</strong>
                 </div>
                 <div class="kpr-result-row">
-                  <span>{isEn() ? 'Loan (70%):' : 'Plafon KPR:'}</span>
+                  <span>
+                    {isEn()
+                      ? `Loan (${100 - res().dpPercent}%):`
+                      : `Plafon KPR (${100 - res().dpPercent}%):`}
+                  </span>
                   <strong>Rp {formatInputRupiahText(res().loanPrincipal)}</strong>
                 </div>
               </div>

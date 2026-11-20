@@ -249,7 +249,7 @@ function App() {
   const [showLogoutModal, setShowLogoutModal] = createSignal(false);
   const [loginForm, setLoginForm] = createStore({ email: '', password: '' });
   const [clusters, setClustersState] = createSignal(
-    loadStored('jakurban_cached_clusters', []).map(computeProjectSummary)
+    loadStored('jakurban_cached_clusters', INITIAL_CLUSTERS).map(computeProjectSummary)
   );
   const [searchQuery, setSearchQuery] = createSignal('');
   const [filters, setFilters] = createSignal({ location: '', priceRange: '', sort: '' });
@@ -291,6 +291,25 @@ function App() {
     if (targetView === 'dashboard') return '#dashboard';
     if (targetView === 'chatbot') return '#chatbot';
     return window.location.pathname + window.location.search;
+  };
+
+  const parseUrlHash = (hashStr = window.location.hash) => {
+    const raw = String(hashStr || '').replace(/^#\/?/, '').trim();
+    if (!raw) return null;
+    const parts = raw.split('/').map((p) => decodeURIComponent(p));
+    if (parts[0] === 'detail' && parts[1]) {
+      return { view: 'detail', propertyId: parts[1], unitId: null };
+    }
+    if (parts[0] === 'unit' && parts[1] && parts[2]) {
+      return { view: 'unit-detail', propertyId: parts[1], unitId: parts[2] };
+    }
+    if (parts[0] === 'dashboard') {
+      return { view: 'dashboard', propertyId: null, unitId: null };
+    }
+    if (parts[0] === 'chatbot') {
+      return { view: 'chatbot', propertyId: null, unitId: null };
+    }
+    return null;
   };
 
   const setSelectedProperty = (prop) => setSelectedPropertyId(prop?.id ?? null);
@@ -371,6 +390,17 @@ function App() {
   onMount(async () => {
     // Tangkap parameter referral agent (?agent=...) dari URL jika ada
     captureAgentFromUrl();
+
+    // Prioritaskan deep-link dari URL hash (#detail/..., #unit/.../..., #chatbot, #dashboard) jika ada
+    const hashRoute = parseUrlHash();
+    if (hashRoute) {
+      if (hashRoute.propertyId) setSelectedPropertyId(hashRoute.propertyId);
+      if (hashRoute.unitId) setSelectedUnitId(hashRoute.unitId);
+      const targetHashView =
+        hashRoute.view === 'dashboard' && !isAdmin() ? 'catalog' : hashRoute.view;
+      setViewStorage(targetHashView);
+    }
+
     const initialView = view();
     const initPropId = selectedPropertyId();
     const initUnitId = selectedUnitId();
@@ -584,21 +614,32 @@ function App() {
     }
 
     if (f.priceRange && f.priceRange !== 'Semua') {
-      result = result.filter((c) => {
-        const minP = Number(c.priceNum || 0);
-        const maxP = Number(c.maxPriceNum || minP);
+      const isPriceInSelectedRange = (priceVal) => {
+        const p = Number(priceVal || 0);
+        if (p <= 0) return false;
         switch (f.priceRange) {
           case '< Rp 500jt':
-            return minP > 0 && minP < 500000000;
+            return p < 500000000;
           case 'Rp 500jt - 1M':
-            return maxP >= 500000000 && minP <= 1000000000;
+            return p >= 500000000 && p <= 1000000000;
           case 'Rp 1M - 2M':
-            return maxP > 1000000000 && minP <= 2000000000;
+            return p >= 1000000000 && p <= 2000000000;
           case '> Rp 2M':
-            return maxP > 2000000000;
+            return p > 2000000000;
           default:
             return true;
         }
+      };
+
+      result = result.filter((c) => {
+        const unitPrices = (c.units || [])
+          .map((u) => Number(u.rawPrice || 0))
+          .filter((p) => p > 0);
+
+        if (unitPrices.length > 0) {
+          return unitPrices.some(isPriceInSelectedRange);
+        }
+        return isPriceInSelectedRange(c.priceNum);
       });
     }
 

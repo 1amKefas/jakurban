@@ -11,14 +11,8 @@ public class OpenAiEmbeddingService : IEmbeddingService
     private readonly ILogger<OpenAiEmbeddingService> _logger;
     private const int TargetVectorDimension = 1536;
 
-    // Cache vektor di memori agar kueri yang sama instan (0ms)
     private static readonly ConcurrentDictionary<string, float[]> _embeddingCache = new(StringComparer.OrdinalIgnoreCase);
-
-    // Cooldown spesifik per kombinasi (ApiKey + Model) agar jika 1 model/key terkena 429, key/model lain tetap jalan normal
-    private static readonly ConcurrentDictionary<string, DateTime> _keyModelCooldowns = new(StringComparer.OrdinalIgnoreCase);
-
-    // Indeks Round-Robin agar beban trafik terbagi rata antar API Key
-    private static int _roundRobinIndex = 0;
+    private static string? _detectedOllamaModel;
 
     public OpenAiEmbeddingService(
         HttpClient httpClient,
@@ -30,69 +24,27 @@ public class OpenAiEmbeddingService : IEmbeddingService
         _logger = logger;
     }
 
-    /// Membaca daftar nilai konfigurasi baik dari format JSON Array maupun string yang dipisahkan koma/titik koma.
-    private IEnumerable<string> ReadConfigList(string arraySectionKey, params string[] singleValueKeys)
+    private string GetOllamaBaseUrl() =>
+        (_configuration["Ollama:BaseUrl"]?.Trim() ?? "http://localhost:11434").TrimEnd('/');
+
+    private List<string> GetValidGeminiApiKeys()
     {
         var items = new List<string>();
+        var arr = _configuration.GetSection("Gemini:ApiKeys").Get<string[]>();
+        if (arr != null) items.AddRange(arr);
 
-        var arrayValues = _configuration.GetSection(arraySectionKey).Get<string[]>();
-        if (arrayValues != null)
-        {
-            items.AddRange(arrayValues);
-        }
+        var single = _configuration["Gemini:ApiKey"];
+        if (!string.IsNullOrWhiteSpace(single))
+            items.AddRange(single.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries));
 
-        foreach (var key in singleValueKeys)
-        {
-            var raw = _configuration[key];
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                items.AddRange(raw.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries));
-            }
-        }
-
-        return items.Select(v => v.Trim()).Where(v => !string.IsNullOrWhiteSpace(v));
-    }
-
-    /// Mengambil daftar seluruh API Key yang valid (mengabaikan teks placeholder cadangan).
-    private List<string> GetValidGeminiApiKeys() =>
-        ReadConfigList("Gemini:ApiKeys", "Gemini:ApiKey", "OpenAI:ApiKey")
-            .Where(k => !k.StartsWith("PASTE_", StringComparison.OrdinalIgnoreCase) &&
-                        !k.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase) &&
-                        !k.Contains("CADANGAN", StringComparison.OrdinalIgnoreCase) &&
-                        !k.Contains("API_KEY", StringComparison.OrdinalIgnoreCase))
+        return items
+            .Select(k => k.Trim())
+            .Where(k => !string.IsNullOrWhiteSpace(k) &&
+                        !k.StartsWith("PASTE_", StringComparison.OrdinalIgnoreCase) &&
+                        !k.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.Ordinal)
             .ToList();
-
-    /// Mengambil daftar kandidat model Chat secara berurutan untuk mekanisme Multi-Model Auto-Failover.
-    private List<string> GetCandidateChatModels() =>
-        ReadConfigList("Gemini:ChatModels", "Gemini:ChatModel")
-            .Concat(new[]
-            {
-                "gemini-3.8-flash",
-                "gemini-3.6-flash",
-                "gemini-3.5-flash"
-            })
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    private static bool IsSlotAvailable(string apiKey, string modelName)
-    {
-        var slotKey = $"{apiKey}::{modelName}";
-        if (_keyModelCooldowns.TryGetValue(slotKey, out var until))
-        {
-            if (DateTime.UtcNow < until) return false;
-            _keyModelCooldowns.TryRemove(slotKey, out _);
-        }
-        return true;
     }
-
-    private static void MarkSlotCooldown(string apiKey, string modelName, int seconds)
-    {
-        var slotKey = $"{apiKey}::{modelName}";
-        _keyModelCooldowns[slotKey] = DateTime.UtcNow.AddSeconds(seconds);
-    }
-
-    private static string MaskKey(string key) =>
-        key.Length <= 8 ? "***" : $"{key[..4]}...{key[^4..]}";
 
     private static float[] NormalizeAndFitDimension(float[] rawVector)
     {
@@ -120,6 +72,61 @@ public class OpenAiEmbeddingService : IEmbeddingService
         return fitted;
     }
 
+    /// <summary>
+    /// Mengecek daftar model yang ter-install di Ollama lokal (http://localhost:11434/api/tags).
+    /// Jika model di appsettings.json sudah ter-install maka dipakai; jika belum, otomatis memakai model pertama yang tersedia di Ollama.
+    /// </summary>
+    private async Task<string?> ResolveAvailableOllamaModelAsync(string baseUrl, string preferredModel)
+    {
+        if (!string.IsNullOrWhiteSpace(_detectedOllamaModel))
+        {
+            return _detectedOllamaModel;
+        }
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var response = await _httpClient.GetAsync($"{baseUrl}/api/tags", cts.Token);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var json = await response.Content.ReadAsStringAsync(cts.Token);
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("models", out var modelsArr) || modelsArr.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var installedModels = new List<string>();
+            foreach (var item in modelsArr.EnumerateArray())
+            {
+                if (item.TryGetProperty("name", out var nameElem))
+                {
+                    var name = nameElem.GetString();
+                    if (!string.IsNullOrWhiteSpace(name) && !name.Contains("embed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        installedModels.Add(name);
+                    }
+                }
+            }
+
+            if (installedModels.Count == 0) return null;
+
+            // Cek apakah model yang diset di appsettings.json ada di daftar ollama list
+            var exactOrPrefixMatch = installedModels.FirstOrDefault(m =>
+                m.Equals(preferredModel, StringComparison.OrdinalIgnoreCase) ||
+                m.StartsWith(preferredModel + ":", StringComparison.OrdinalIgnoreCase));
+
+            _detectedOllamaModel = exactOrPrefixMatch ?? installedModels[0];
+            _logger.LogInformation("Ollama aktif! Menggunakan model lokal: {Model}", _detectedOllamaModel);
+            return _detectedOllamaModel;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public async Task<float[]> GenerateEmbeddingAsync(string text)
     {
         var apiKeys = GetValidGeminiApiKeys();
@@ -134,19 +141,13 @@ public class OpenAiEmbeddingService : IEmbeddingService
             return cachedVector;
         }
 
-        var embeddingModel = _configuration["Gemini:EmbeddingModel"]?.Trim();
-        if (string.IsNullOrWhiteSpace(embeddingModel))
-        {
-            embeddingModel = "gemini-embedding-001";
-        }
+        var embeddingModel = _configuration["Gemini:EmbeddingModel"]?.Trim() ?? "gemini-embedding-001";
 
         foreach (var apiKey in apiKeys)
         {
-            if (!IsSlotAvailable(apiKey, embeddingModel)) continue;
-
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
                 var url = $"https://generativelanguage.googleapis.com/v1beta/models/{embeddingModel}:embedContent?key={apiKey}";
 
                 var requestBody = new
@@ -165,16 +166,7 @@ public class OpenAiEmbeddingService : IEmbeddingService
                 };
 
                 using var response = await _httpClient.SendAsync(request, cts.Token);
-                if (!response.IsSuccessStatusCode)
-                {
-                    var statusCode = (int)response.StatusCode;
-                    // Jika 429 (kuota habis) atau 401/403, kunci key ini sementara lalu coba API Key berikutnya
-                    if (statusCode == 429 || statusCode == 401 || statusCode == 403)
-                    {
-                        MarkSlotCooldown(apiKey, embeddingModel, statusCode == 429 ? 300 : 600);
-                    }
-                    continue;
-                }
+                if (!response.IsSuccessStatusCode) continue;
 
                 var jsonString = await response.Content.ReadAsStringAsync(cts.Token);
                 using var doc = JsonDocument.Parse(jsonString);
@@ -195,9 +187,9 @@ public class OpenAiEmbeddingService : IEmbeddingService
                     return normalized;
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                _logger.LogWarning("Embedding dengan key {Key} dilewati ({Msg}), mencoba key berikutnya...", MaskKey(apiKey), ex.Message);
+                // Lanjut jika embedding gagal
             }
         }
 
@@ -209,13 +201,90 @@ public class OpenAiEmbeddingService : IEmbeddingService
         string userMessage,
         IEnumerable<ChatTurnDto>? history = null)
     {
-        var apiKeys = GetValidGeminiApiKeys();
-        if (apiKeys.Count == 0)
+        // =========================================================================
+        // 1. PRIORITAS UTAMA: OLLAMA LOKAL (Bebas 503, Bebas Limit Kuota, 100% LLM)
+        // =========================================================================
+        var ollamaBaseUrl = GetOllamaBaseUrl();
+        var configuredOllamaModel = _configuration["Ollama:ChatModel"]?.Trim() ?? "gemma3:4b";
+        var activeOllamaModel = await ResolveAvailableOllamaModelAsync(ollamaBaseUrl, configuredOllamaModel);
+
+        if (!string.IsNullOrWhiteSpace(activeOllamaModel))
         {
-            return null;
+            try
+            {
+                var ollamaMessages = new List<object>
+                {
+                    new { role = "system", content = systemPrompt }
+                };
+
+                if (history != null)
+                {
+                    foreach (var turn in history.TakeLast(8))
+                    {
+                        if (string.IsNullOrWhiteSpace(turn.Content)) continue;
+                        ollamaMessages.Add(new
+                        {
+                            role = turn.Role == "user" ? "user" : "assistant",
+                            content = turn.Content
+                        });
+                    }
+                }
+
+                ollamaMessages.Add(new { role = "user", content = userMessage });
+
+                var ollamaPayload = JsonSerializer.Serialize(new
+                {
+                    model = activeOllamaModel,
+                    messages = ollamaMessages,
+                    stream = false,
+                    options = new
+                    {
+                        temperature = 0.65,
+                        top_p = 0.95,
+                        num_ctx = 4096
+                    }
+                });
+
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                using var request = new HttpRequestMessage(HttpMethod.Post, $"{ollamaBaseUrl}/api/chat")
+                {
+                    Content = new StringContent(ollamaPayload, Encoding.UTF8, "application/json")
+                };
+
+                using var response = await _httpClient.SendAsync(request, cts.Token);
+                if (response.IsSuccessStatusCode)
+                {
+                    var jsonString = await response.Content.ReadAsStringAsync(cts.Token);
+                    using var doc = JsonDocument.Parse(jsonString);
+
+                    if (doc.RootElement.TryGetProperty("message", out var msgElem) &&
+                        msgElem.TryGetProperty("content", out var contentElem))
+                    {
+                        var reply = contentElem.GetString()?.Trim();
+                        if (!string.IsNullOrWhiteSpace(reply))
+                        {
+                            _logger.LogInformation("Respons berhasil di-generate oleh Ollama ({Model}).", activeOllamaModel);
+                            return reply.Replace("**", "");
+                        }
+                    }
+                }
+                else
+                {
+                    var err = await response.Content.ReadAsStringAsync(cts.Token);
+                    _logger.LogWarning("Ollama merespons {Status}: {Err}", response.StatusCode, err);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Panggilan ke Ollama lokal gagal/timeout: {Msg}. Mencoba fallback Gemini...", ex.Message);
+            }
         }
 
-        var candidateModels = GetCandidateChatModels();
+        // =========================================================================
+        // 2. FALLBACK CADANGAN: GEMINI API (Jika dijalankan di server tanpa Ollama)
+        // =========================================================================
+        var apiKeys = GetValidGeminiApiKeys();
+        if (apiKeys.Count == 0) return null;
 
         var contents = new List<object>();
         if (history != null)
@@ -225,7 +294,6 @@ public class OpenAiEmbeddingService : IEmbeddingService
             {
                 if (string.IsNullOrWhiteSpace(turn.Content)) continue;
                 var mappedRole = turn.Role == "user" ? "user" : "model";
-
                 if (contents.Count == 0 && mappedRole != "user") continue;
                 if (mappedRole == lastRole) continue;
 
@@ -236,11 +304,8 @@ public class OpenAiEmbeddingService : IEmbeddingService
                 });
                 lastRole = mappedRole;
             }
-
             if (lastRole == "user" && contents.Count > 0)
-            {
                 contents.RemoveAt(contents.Count - 1);
-            }
         }
 
         contents.Add(new
@@ -249,96 +314,45 @@ public class OpenAiEmbeddingService : IEmbeddingService
             parts = new[] { new { text = userMessage } }
         });
 
-        var requestBody = new
+        var geminiPayload = JsonSerializer.Serialize(new
         {
-            system_instruction = new
-            {
-                parts = new[] { new { text = systemPrompt } }
-            },
+            system_instruction = new { parts = new[] { new { text = systemPrompt } } },
             contents = contents,
             generationConfig = new
             {
-                temperature = 0.2,
+                temperature = 0.65,
                 topP = 0.95,
-                maxOutputTokens = 650
+                maxOutputTokens = 1500,
+                thinkingConfig = new { thinkingBudget = 0 }
             }
-        };
+        });
 
-        var jsonPayload = JsonSerializer.Serialize(requestBody);
-        int startKeyIdx = Math.Abs(Interlocked.Increment(ref _roundRobinIndex));
-
-        // Iterasi seluruh kandidat Model dan seluruh API Key (Failover Otomatis)
-        foreach (var modelName in candidateModels)
+        foreach (var apiKey in apiKeys)
         {
-            for (int k = 0; k < apiKeys.Count; k++)
+            try
             {
-                var apiKey = apiKeys[(startKeyIdx + k) % apiKeys.Count];
-                if (!IsSlotAvailable(apiKey, modelName))
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={apiKey}";
+                using var req = new HttpRequestMessage(HttpMethod.Post, url)
                 {
-                    continue;
-                }
+                    Content = new StringContent(geminiPayload, Encoding.UTF8, "application/json")
+                };
 
-                var url = $"https://generativelanguage.googleapis.com/v1beta/models/{modelName}:generateContent?key={apiKey}";
+                using var res = await _httpClient.SendAsync(req, cts.Token);
+                if (!res.IsSuccessStatusCode) continue;
 
-                try
+                var raw = await res.Content.ReadAsStringAsync(cts.Token);
+                using var doc = JsonDocument.Parse(raw);
+                if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.GetArrayLength() > 0)
                 {
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                    using var request = new HttpRequestMessage(HttpMethod.Post, url)
-                    {
-                        Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json")
-                    };
-
-                    using var response = await _httpClient.SendAsync(request, cts.Token);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        var statusCode = (int)response.StatusCode;
-                        _logger.LogWarning(
-                            "Gemini API (Model: {Model}, Key: {Key}) merespons {Status}. Beralih ke API Key / Model cadangan...",
-                            modelName, MaskKey(apiKey), response.StatusCode);
-
-                        // Jika 429 (Quota Exceeded), istirahatkan kombinasi Key+Model ini selama 10 menit dan langsung lanjut ke key/model berikutnya!
-                        if (statusCode == 429)
-                        {
-                            MarkSlotCooldown(apiKey, modelName, 600);
-                        }
-                        else if (statusCode == 401 || statusCode == 403 || statusCode == 404)
-                        {
-                            MarkSlotCooldown(apiKey, modelName, 1800);
-                        }
-                        else
-                        {
-                            MarkSlotCooldown(apiKey, modelName, 60);
-                        }
-
-                        continue;
-                    }
-
-                    var jsonString = await response.Content.ReadAsStringAsync(cts.Token);
-                    using var doc = JsonDocument.Parse(jsonString);
-
-                    if (doc.RootElement.TryGetProperty("candidates", out var candidates) &&
-                        candidates.GetArrayLength() > 0)
-                    {
-                        var firstCandidate = candidates[0];
-                        if (firstCandidate.TryGetProperty("content", out var contentObj) &&
-                            contentObj.TryGetProperty("parts", out var partsArr) &&
-                            partsArr.GetArrayLength() > 0)
-                        {
-                            var textResult = partsArr[0].GetProperty("text").GetString();
-                            if (!string.IsNullOrWhiteSpace(textResult))
-                            {
-                                return textResult.Replace("**", "");
-                            }
-                        }
-                    }
+                    var text = cands[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString();
+                    if (!string.IsNullOrWhiteSpace(text))
+                        return text.Replace("**", "");
                 }
-                catch (Exception ex)
-                {
-                    MarkSlotCooldown(apiKey, modelName, 45);
-                    _logger.LogWarning(
-                        "Timeout/Error pada Model {Model} (Key {Key}): {Msg}. Mencoba fallback berikutnya...",
-                        modelName, MaskKey(apiKey), ex.Message);
-                }
+            }
+            catch
+            {
+                // Abaikan jika Gemini sedang 503
             }
         }
 

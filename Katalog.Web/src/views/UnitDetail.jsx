@@ -6,7 +6,6 @@ import { formatCompactRupiah, formatPublicLocation, parseSmartRupiahNumber } fro
 import { t, isEn } from '../utils/i18n';
 import {
   DetailHeroCarousel,
-  DetailVideoSection,
   DetailMapSection,
   DetailContactCard,
   RichTextContent
@@ -63,6 +62,7 @@ export default function UnitDetail(props) {
 
         <DetailHeroCarousel
           photos={photos()}
+          videos={videos()}
           resetKey={`${unit().id || ''}-${unit().name || ''}`}
           title={unit().name}
           thumbAltPrefix={unit().name}
@@ -72,11 +72,6 @@ export default function UnitDetail(props) {
         <div class="container detail-main-body">
           <div class="detail-content-layout">
             <div class="detail-left-content">
-              <DetailVideoSection
-                videos={videos()}
-                heading={isEn() ? 'Unit & Cluster Video Tour' : 'Video Tur Unit & Kawasan'}
-              />
-
               <div class="detail-info">
                 <div class="unit-status-meta-row">
                   <span class={`badge ${getStatusColor(unit().status)}`}>

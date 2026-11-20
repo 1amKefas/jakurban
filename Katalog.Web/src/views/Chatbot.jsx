@@ -51,7 +51,15 @@ export function Chatbot(props) {
     }
   });
 
+  let activeRequestId = 0;
+
+  const stopTypingResponse = () => {
+    activeRequestId++;
+    setIsTyping(false);
+  };
+
   const handleStartNewChat = async () => {
+    stopTypingResponse();
     const oldUuid = sessionId();
     try {
       await apiService.clearChatHistory(oldUuid);
@@ -64,17 +72,20 @@ export function Chatbot(props) {
   };
 
   const sendMessage = async (textToSend) => {
+    if (isTyping()) return;
     const trimmed = (typeof textToSend === 'string' ? textToSend : input()).trim();
     if (!trimmed) return;
 
+    const currentReqId = ++activeRequestId;
     const userMessage = { id: Date.now(), sender: 'user', text: trimmed };
     setMessages((prev) => [...prev, userMessage]);
-    setInput('');
+    if (typeof textToSend !== 'string') setInput('');
     setIsTyping(true);
     props.onMessageSent?.();
 
     try {
       const data = await apiService.sendChatMessage(trimmed);
+      if (currentReqId !== activeRequestId) return;
       if (data.sessionId) setSessionId(data.sessionId);
 
       const replyText =
@@ -94,13 +105,16 @@ export function Chatbot(props) {
         }
       ]);
     } catch (err) {
+      if (currentReqId !== activeRequestId) return;
       console.warn('Chat API belum terjangkau, memakai respons fallback:', err.message);
       setMessages((prev) => [
         ...prev,
         { id: Date.now() + 1, sender: 'bot', text: getFallbackBotResponse(trimmed) }
       ]);
     } finally {
-      setIsTyping(false);
+      if (currentReqId === activeRequestId) {
+        setIsTyping(false);
+      }
     }
   };
 
@@ -332,7 +346,13 @@ export function Chatbot(props) {
             />
             <div class="input-actions">
               <span class="model-selector">JakUrban RAG</span>
-              <button class="send-btn" onClick={() => sendMessage()} aria-label="Kirim Pesan">
+              <button
+                type="button"
+                class="send-btn"
+                onClick={() => (isTyping() ? stopTypingResponse() : sendMessage())}
+                aria-label={isTyping() ? 'Hentikan Respons' : 'Kirim Pesan'}
+                title={isTyping() ? 'Hentikan Respons' : 'Kirim Pesan'}
+              >
                 <Show when={!isTyping()} fallback={<div class="stop-icon"></div>}>
                   <Icons.Send />
                 </Show>
