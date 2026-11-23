@@ -404,7 +404,52 @@ const requestApi = async (path, { method = 'GET', body, errorPrefix, detailedErr
   return res;
 };
 
+/**
+ * Mengompres file gambar di browser menjadi WebP (maks 1440x1080, kualitas 82%)
+ * agar ukuran file menyusut ~85-90% sebelum diunggah ke Cloudflare R2.
+ */
+export const compressImageToWebp = (file, maxWidth = 1440, maxHeight = 1080, quality = 0.82) =>
+  new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      let { width, height } = img;
+
+      if (width > maxWidth || height > maxHeight) {
+        const ratio = Math.min(maxWidth / width, maxHeight / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) return reject(new Error('Gagal mengompres gambar ke WebP.'));
+          const baseName = (file.name || 'photo').replace(/\.[^/.]+$/, '');
+          resolve(new File([blob], `${baseName}.webp`, { type: 'image/webp' }));
+        },
+        'image/webp',
+        quality
+      );
+    };
+
+    img.onerror = (err) => {
+      URL.revokeObjectURL(objectUrl);
+      reject(err);
+    };
+
+    img.src = objectUrl;
+  });
+
 export const apiService = {
+  
   /** Mengambil seluruh daftar project/cluster beserta unitnya dari PostgreSQL. */
   async getProjects() {
     const res = await requestApi('/properties', { errorPrefix: 'Gagal memuat data properti' });
@@ -443,6 +488,43 @@ export const apiService = {
     return true;
   },
 
+  /**
+   * Mengompres foto ke WebP lalu mengunggahnya ke Cloudflare R2 via POST /api/media/upload.
+   * Di mode localhost (dev), jika R2 belum dikonfigurasi, otomatis fallback ke WebP DataURL agar tetap bisa dites.
+   */
+  async uploadImage(file) {
+    const compressedFile = await compressImageToWebp(file);
+    const formData = new FormData();
+    formData.append('file', compressedFile);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/media/upload`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.url) return data.url;
+      }
+
+      const errBody = await res.json().catch(() => null);
+      throw new Error(errBody?.message || `Gagal mengunggah foto (${res.status})`);
+    } catch (err) {
+      // Pengaman khusus development lokal sebelum kredensial R2 diisi di appsettings.json
+      if (isLocalhost) {
+        console.warn('Upload R2 lokal dilewati (memakai fallback WebP lokal):', err.message);
+        return await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(compressedFile);
+        });
+      }
+      throw err;
+    }
+  },
+
   /** Mengirim pesan pengguna ke endpoint RAG Chatbot dengan SessionId UUID aktif. */
   async sendChatMessage(message) {
     const res = await requestApi('/chat', {
@@ -451,6 +533,49 @@ export const apiService = {
       errorPrefix: 'Gagal menghubungi server AI'
     });
     return await res.json();
+  },
+
+  /** Mengirim pesan ke endpoint Streaming SSE agar token LLM tampil real-time kata-per-kata. */
+  async streamChatMessage(message, { onToken, onDone, signal } = {}) {
+    const res = await fetch(`${API_BASE_URL}/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: getChatSessionId(), message }),
+      signal
+    });
+
+    if (!res.ok || !res.body) {
+      throw new Error(`Gagal membuka stream AI (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || '';
+
+      for (const rawEvent of events) {
+        const line = rawEvent.split('\n').find((l) => l.startsWith('data: '));
+        if (!line) continue;
+
+        try {
+          const payload = JSON.parse(line.slice(6));
+          if (payload.type === 'token' && payload.text) {
+            onToken?.(payload.text);
+          } else if (payload.type === 'done') {
+            onDone?.(payload);
+          }
+        } catch {
+          // Abaikan chunk JSON parsial
+        }
+      }
+    }
   },
 
   /** Memulihkan riwayat percakapan berdasarkan UUID sesi pengguna. */

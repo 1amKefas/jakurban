@@ -2,12 +2,15 @@ import { createSignal, createEffect, onMount, For, Show } from 'solid-js';
 import { apiService, getChatSessionId, resetChatSessionId, formatCompactRupiah, formatPublicLocation } from '../services/api';
 import { INITIAL_CHAT_GREETING, getFallbackBotResponse } from '../constants/defaultData';
 import { Icons } from '../components/common/Icons';
+import ChatMarkdown from '../components/common/ChatMarkdown';
 import '../styles/chatbot.css';
+
 
 export function Chatbot(props) {
   const [messages, setMessages] = createSignal([INITIAL_CHAT_GREETING]);
   const [input, setInput] = createSignal('');
   const [isTyping, setIsTyping] = createSignal(false);
+  const [streamingText, setStreamingText] = createSignal('');
   const [sessionId, setSessionId] = createSignal(getChatSessionId());
   const [isSidebarOpen, setIsSidebarOpen] = createSignal(false);
 
@@ -21,8 +24,11 @@ export function Chatbot(props) {
 
   createEffect(() => {
     messages();
+    streamingText();
     isTyping();
-    scrollToBottom();
+    if (messagesEndRef) {
+      messagesEndRef.scrollIntoView({ behavior: streamingText() ? 'auto' : 'smooth' });
+    }
   });
 
   onMount(async () => {
@@ -52,9 +58,22 @@ export function Chatbot(props) {
   });
 
   let activeRequestId = 0;
+  let activeAbortController = null;
 
   const stopTypingResponse = () => {
     activeRequestId++;
+    if (activeAbortController) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+    const partial = streamingText().trim();
+    if (partial) {
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now() + 1, sender: 'bot', text: partial, recommendations: [] }
+      ]);
+    }
+    setStreamingText('');
     setIsTyping(false);
   };
 
@@ -77,42 +96,57 @@ export function Chatbot(props) {
     if (!trimmed) return;
 
     const currentReqId = ++activeRequestId;
+    const controller = new AbortController();
+    activeAbortController = controller;
+
     const userMessage = { id: Date.now(), sender: 'user', text: trimmed };
     setMessages((prev) => [...prev, userMessage]);
     if (typeof textToSend !== 'string') setInput('');
+    setStreamingText('');
     setIsTyping(true);
     props.onMessageSent?.();
 
+    let accumulated = '';
+    let finalMeta = null;
+
     try {
-      const data = await apiService.sendChatMessage(trimmed);
+      await apiService.streamChatMessage(trimmed, {
+        signal: controller.signal,
+        onToken: (chunk) => {
+          if (currentReqId !== activeRequestId) return;
+          accumulated += chunk;
+          setStreamingText(accumulated);
+        },
+        onDone: (meta) => {
+          if (currentReqId !== activeRequestId) return;
+          finalMeta = meta;
+          if (meta.sessionId) setSessionId(meta.sessionId);
+        }
+      });
+
       if (currentReqId !== activeRequestId) return;
-      if (data.sessionId) setSessionId(data.sessionId);
 
-      const replyText =
-        data.reply ||
-        data.response ||
-        data.answer ||
-        data.message ||
-        (typeof data === 'string' ? data : getFallbackBotResponse(trimmed));
-
+      const replyText = accumulated.trim() || getFallbackBotResponse(trimmed);
       setMessages((prev) => [
         ...prev,
         {
           id: Date.now() + 1,
           sender: 'bot',
           text: replyText,
-          recommendations: data.recommendations || data.properties || []
+          recommendations: finalMeta?.recommendations || []
         }
       ]);
     } catch (err) {
-      if (currentReqId !== activeRequestId) return;
-      console.warn('Chat API belum terjangkau, memakai respons fallback:', err.message);
+      if (err?.name === 'AbortError' || currentReqId !== activeRequestId) return;
+      console.warn('Streaming AI gagal, memakai respons fallback:', err.message);
       setMessages((prev) => [
         ...prev,
-        { id: Date.now() + 1, sender: 'bot', text: getFallbackBotResponse(trimmed) }
+        { id: Date.now() + 1, sender: 'bot', text: accumulated.trim() || getFallbackBotResponse(trimmed) }
       ]);
     } finally {
       if (currentReqId === activeRequestId) {
+        activeAbortController = null;
+        setStreamingText('');
         setIsTyping(false);
       }
     }
@@ -142,7 +176,7 @@ export function Chatbot(props) {
             <div class="brand-icon">
               <Icons.Sparkles />
             </div>
-            <span class="brand-name">JakUrban AI</span>
+            <span class="brand-name">JakHome AI</span>
           </div>
           <div class="sidebar-actions">
             <button
@@ -229,7 +263,7 @@ export function Chatbot(props) {
               <Icons.ShieldCheck />
             </div>
             <div class="session-meta">
-              <span class="username">Sesi Privat Aktif</span>
+              <span class="username">Sesi Privat</span>
               <span class="session-uuid">ID: {String(sessionId()).slice(0, 8)}...</span>
             </div>
           </div>
@@ -253,10 +287,10 @@ export function Chatbot(props) {
               </svg>
             </button>
             <Icons.Sparkles />
-            <span>Asisten Katalog Properti NLP (RAG)</span>
+            <span>Asisten AI</span>
           </div>
           <button class="share-btn" onClick={handleStartNewChat}>
-            Reset Sesi
+            Sesi Baru
           </button>
         </header>
 
@@ -271,7 +305,12 @@ export function Chatbot(props) {
                     </div>
                   </Show>
                   <div class="message-content">
-                    <div>{msg.text}</div>
+                    <Show
+                      when={msg.sender === 'bot'}
+                      fallback={<div style={{ 'white-space': 'pre-wrap' }}>{msg.text}</div>}
+                    >
+                      <ChatMarkdown text={msg.text} />
+                    </Show>
 
                     {/* Daftar kartu rekomendasi unit hasil pencarian RAG */}
                     <Show when={msg.recommendations && msg.recommendations.length > 0}>
@@ -324,7 +363,18 @@ export function Chatbot(props) {
                 <div class="bot-avatar">
                   <Icons.Sparkles />
                 </div>
-                <div class="message-content typing">Menganalisis katalog properti via RAG...</div>
+                <Show
+                  when={streamingText().length > 0}
+                  fallback={
+                    <div class="message-content typing">
+                      Berpikir...
+                    </div>
+                  }
+                >
+                  <div class="message-content">
+                    <ChatMarkdown text={streamingText()} isStreaming={true} />
+                  </div>
+                </Show>
               </div>
             </Show>
             <div ref={messagesEndRef} class="scroll-anchor"></div>
@@ -332,10 +382,7 @@ export function Chatbot(props) {
         </div>
 
         <div class="input-container">
-          <div class="input-pill">
-            <button class="add-btn" onClick={handleStartNewChat} title="Sesi Baru">
-              <Icons.PlusCircle />
-            </button>
+          <div class="input-pill">  
             <input
               type="text"
               class="message-input"
@@ -345,7 +392,7 @@ export function Chatbot(props) {
               onKeyDown={handleKeyDown}
             />
             <div class="input-actions">
-              <span class="model-selector">JakUrban RAG</span>
+              <span class="model-selector">JakHome</span>
               <button
                 type="button"
                 class="send-btn"
@@ -360,7 +407,7 @@ export function Chatbot(props) {
             </div>
           </div>
           <div class="disclaimer">
-            Setiap sesi menggunakan UUID unik di Local Storage agar percakapan Anda tetap privat dan faktual.
+            Setiap sesi menggunakan UUID unik agar percakapan anda tetap privat dan faktual.
           </div>
         </div>
       </main>

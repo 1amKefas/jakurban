@@ -1,8 +1,8 @@
 import { createSignal, createMemo, createEffect, For, Show } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { createDefaultUnitForm } from '../../constants/defaultData';
-import { fileToDataUrl, getStatusColor } from '../../utils/formatters';
-import { parseSmartRupiahNumber, resolveExactMapUrls } from '../../services/api';
+import { getStatusColor } from '../../utils/formatters';
+import { apiService, parseSmartRupiahNumber, resolveExactMapUrls } from '../../services/api';
 import { RichTextContent } from '../../views/PropertyDetail';
 
 export const JAKARTA_REGIONS = {
@@ -61,12 +61,6 @@ const ModalIcon = {
       <circle cx="12" cy="13" r="4"></circle>
     </SvgBase>
   ),
-  Video: () => (
-    <SvgBase>
-      <polygon points="23 7 16 12 23 17 23 7"></polygon>
-      <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-    </SvgBase>
-  ),
   Upload: () => (
     <SvgBase>
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -78,11 +72,6 @@ const ModalIcon = {
     <SvgBase>
       <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
       <circle cx="12" cy="10" r="3"></circle>
-    </SvgBase>
-  ),
-  Play: () => (
-    <SvgBase size={13} strokeWidth={2}>
-      <polygon points="5 3 19 12 5 21 5 3"></polygon>
     </SvgBase>
   ),
   ArrowLeft: () => (
@@ -173,7 +162,7 @@ function PhotoManagerCard(props) {
       title="Tahan dan geser (Drag & Drop) untuk mengubah urutan foto"
     >
       <div class="photo-manager-img-wrap">
-        <img src={props.photo} alt={`${props.altPrefix || 'Foto'} ${props.index + 1}`} />
+        <img src={props.photo} alt={`${props.altPrefix || 'Foto'} ${props.index + 1}`} loading="lazy" />
         <span class="photo-order-badge">
           {props.index === 0 ? props.coverLabel : `#${props.index + 1}`}
         </span>
@@ -346,8 +335,8 @@ function RichDescriptionEditor(props) {
 
 export default function ProjectFormModal(props) {
   const [photoUrlInput, setPhotoUrlInput] = createSignal('');
-  const [videoUrlInput, setVideoUrlInput] = createSignal('');
   const [unitPhotoUrlInput, setUnitPhotoUrlInput] = createSignal('');
+  const [isUploadingPhoto, setIsUploadingPhoto] = createSignal(false);
   const [editingUnitIndex, setEditingUnitIndex] = createSignal(null);
   const [unitDraft, setUnitDraft] = createStore(createDefaultUnitForm());
 
@@ -381,7 +370,6 @@ export default function ProjectFormModal(props) {
     syncLocationString(selectedKota(), kec);
   };
 
-  // Reset state sub-form unit & inisialisasi dropdown wilayah hanya saat modal baru dibuka
   let wasModalOpen = false;
   createEffect(() => {
     const isOpen = !!props.show;
@@ -390,7 +378,6 @@ export default function ProjectFormModal(props) {
       setEditingUnitIndex(null);
       setUnitDraft(createDefaultUnitForm());
       setPhotoUrlInput('');
-      setVideoUrlInput('');
       setUnitPhotoUrlInput('');
       return;
     }
@@ -399,6 +386,7 @@ export default function ProjectFormModal(props) {
       wasModalOpen = true;
       setEditingUnitIndex(null);
       setUnitDraft(createDefaultUnitForm());
+      props.setProjectForm('videos', []);
 
       const loc = (props.projectForm.location || '').toLowerCase();
       const matchedKota = KOTA_LIST.find((kota) => loc.includes(kota.toLowerCase())) || '';
@@ -415,7 +403,6 @@ export default function ProjectFormModal(props) {
     const val = e.currentTarget.value;
     props.setProjectForm(field, val);
 
-    // Jika Admin mengetik manual di kolom lokasi, sinkronkan dropdown hanya jika ditemukan kecocokan baru
     if (field === 'location') {
       const loc = val.toLowerCase();
       const matchedKota = KOTA_LIST.find((kota) => loc.includes(kota.toLowerCase()));
@@ -447,19 +434,30 @@ export default function ProjectFormModal(props) {
   };
 
   /**
- * Membaca seluruh file dari elemen <input type="file"> menjadi array Base64 Data URL
- * lalu mereset nilai input agar file yang sama dapat dipilih kembali bila diperlukan.
- */
-  const readFilesFromInput = async (e) => {
-    const files = Array.from(e.currentTarget.files || []);
+   * Mengompres foto ke WebP lalu mengunggah seluruh file terpilih ke Cloudflare R2.
+   */
+  const uploadSelectedPhotoFiles = async (e) => {
+    const files = Array.from(e.currentTarget.files || []).filter((f) =>
+      f.type.startsWith('image/')
+    );
     e.currentTarget.value = '';
-    return files.length ? Promise.all(files.map(fileToDataUrl)) : [];
+    if (!files.length) return [];
+
+    setIsUploadingPhoto(true);
+    try {
+      return await Promise.all(files.map((file) => apiService.uploadImage(file)));
+    } catch (err) {
+      alert(`Gagal mengunggah foto: ${err.message}`);
+      return [];
+    } finally {
+      setIsUploadingPhoto(false);
+    }
   };
 
   const handlePhotoFilesUpload = async (e) => {
-    const base64List = await readFilesFromInput(e);
-    if (base64List.length) {
-      props.setProjectForm('photos', [...props.projectForm.photos, ...base64List]);
+    const uploadedUrls = await uploadSelectedPhotoFiles(e);
+    if (uploadedUrls.length) {
+      props.setProjectForm('photos', [...props.projectForm.photos, ...uploadedUrls]);
     }
   };
 
@@ -512,24 +510,10 @@ export default function ProjectFormModal(props) {
   };
 
   const handleUnitPhotoFilesUpload = async (e) => {
-    const base64List = await readFilesFromInput(e);
-    if (base64List.length) {
-      setUnitDraft('photos', [...(unitDraft.photos || []), ...base64List]);
-      props.setProjectForm('photos', [...props.projectForm.photos, ...base64List]);
-    }
-  };
-
-  const handleAddVideoUrl = () => {
-    const url = videoUrlInput().trim();
-    if (!url) return;
-    props.setProjectForm('videos', [...props.projectForm.videos, url]);
-    setVideoUrlInput('');
-  };
-
-  const handleVideoFilesUpload = async (e) => {
-    const dataUrls = await readFilesFromInput(e);
-    if (dataUrls.length) {
-      props.setProjectForm('videos', [...props.projectForm.videos, ...dataUrls]);
+    const uploadedUrls = await uploadSelectedPhotoFiles(e);
+    if (uploadedUrls.length) {
+      setUnitDraft('photos', [...(unitDraft.photos || []), ...uploadedUrls]);
+      props.setProjectForm('photos', [...props.projectForm.photos, ...uploadedUrls]);
     }
   };
 
@@ -584,6 +568,7 @@ export default function ProjectFormModal(props) {
       carport: Number(cleanCarport),
       status: cleanStatus,
       photos: [...unitPhotos],
+      videos: [],
       id: unitDraft.id || Date.now()
     };
 
@@ -600,6 +585,11 @@ export default function ProjectFormModal(props) {
 
   const handleModalSubmit = (e) => {
     e.preventDefault();
+
+    if (isUploadingPhoto()) {
+      alert('Mohon tunggu proses unggah foto selesai terlebih dahulu.');
+      return;
+    }
 
     if (!String(props.projectForm.name || '').trim()) {
       alert('Nama Project / Cluster wajib diisi!');
@@ -621,6 +611,7 @@ export default function ProjectFormModal(props) {
       return;
     }
 
+    props.setProjectForm('videos', []);
     props.onSubmit(e);
   };
 
@@ -761,13 +752,13 @@ export default function ProjectFormModal(props) {
               </div>
             </div>
 
-            {/* SECTION 2: GALERI MEDIA, RE-ARRANGE FOTO COVER, & ASSIGN KE UNIT */}
+            {/* SECTION 2: GALERI FOTO, RE-ARRANGE FOTO COVER, & ASSIGN KE UNIT */}
             <div class="form-section">
               <h3 class="section-heading">
-                2. Galeri Media Project (Atur Cover PropertyCard & Assign ke Unit)
+                2. Galeri Foto Project (Atur Cover PropertyCard & Assign ke Unit)
               </h3>
               <p class="text-xs text-muted section-subhint">
-                Foto urutan #1 otomatis menjadi <strong>Cover Utama di PropertyCard</strong>. Gunakan tombol Kiri / Kanan untuk mengurutkan foto.
+                Foto urutan #1 otomatis menjadi <strong>Cover Utama di PropertyCard</strong>. Foto yang diunggah otomatis dikompres ke WebP & disimpan di CDN.
               </p>
 
               <div class="form-grid">
@@ -792,11 +783,16 @@ export default function ProjectFormModal(props) {
                       type="file"
                       accept="image/*"
                       multiple
+                      disabled={isUploadingPhoto()}
                       onChange={handlePhotoFilesUpload}
                       hidden
                     />
                     <ModalIcon.Upload />
-                    <span>Pilih Beberapa File Foto dari Perangkat</span>
+                    <span>
+                      {isUploadingPhoto()
+                        ? 'Mengompres & mengunggah foto ke CDN...'
+                        : 'Pilih Beberapa File Foto dari Perangkat'}
+                    </span>
                   </label>
 
                   <Show when={props.projectForm.photos.length > 0}>
@@ -858,59 +854,6 @@ export default function ProjectFormModal(props) {
                             </PhotoManagerCard>
                           );
                         }}
-                      </For>
-                    </div>
-                  </Show>
-                </div>
-
-                <div class="media-box col-span-2">
-                  <label class="media-label label-with-icon">
-                    <ModalIcon.Video />
-                    <span>Video Project ({props.projectForm.videos.length})</span>
-                  </label>
-                  <div class="media-input-row">
-                    <input
-                      type="url"
-                      placeholder="Tempel URL video (MP4)..."
-                      value={videoUrlInput()}
-                      onInput={(e) => setVideoUrlInput(e.currentTarget.value)}
-                    />
-                    <button type="button" class="btn-secondary" onClick={handleAddVideoUrl}>
-                      + Link Video
-                    </button>
-                  </div>
-                  <label class="upload-dropzone label-with-icon-center">
-                    <input
-                      type="file"
-                      accept="video/*"
-                      multiple
-                      onChange={handleVideoFilesUpload}
-                      hidden
-                    />
-                    <ModalIcon.Upload />
-                    <span>Pilih Beberapa File Video dari Perangkat</span>
-                  </label>
-
-                  <Show when={props.projectForm.videos.length > 0}>
-                    <div class="video-preview-list">
-                      <For each={props.projectForm.videos}>
-                        {(video, idx) => (
-                          <div class="video-preview-item">
-                            <span class="video-name label-with-icon">
-                              <ModalIcon.Play />
-                              <span>Video #{idx() + 1} ({video.slice(0, 32)}...)</span>
-                            </span>
-                            <button
-                              type="button"
-                              class="remove-video-btn"
-                              onClick={() =>
-                                props.setProjectForm('videos', removeAtIndex(props.projectForm.videos, idx()))
-                              }
-                            >
-                              Hapus
-                            </button>
-                          </div>
-                        )}
                       </For>
                     </div>
                   </Show>
@@ -1069,7 +1012,7 @@ export default function ProjectFormModal(props) {
                                   onClick={() => togglePhotoInUnitDraft(projPhoto)}
                                   title="Klik untuk assign / lepas foto ini dari unit"
                                 >
-                                  <img src={projPhoto} alt={`Project Foto ${pIdx() + 1}`} />
+                                  <img src={projPhoto} alt={`Project Foto ${pIdx() + 1}`} loading="lazy" />
                                   <span class="select-check-badge">
                                     {isSelected() ? 'Terpilih' : 'Pilih'}
                                   </span>
@@ -1095,10 +1038,11 @@ export default function ProjectFormModal(props) {
                             type="file"
                             accept="image/*"
                             multiple
+                            disabled={isUploadingPhoto()}
                             onChange={handleUnitPhotoFilesUpload}
                             hidden
                           />
-                          <ModalIcon.Upload /> Upload Foto Unit
+                          <ModalIcon.Upload /> {isUploadingPhoto() ? 'Mengunggah...' : 'Upload Foto Unit'}
                         </label>
                       </div>
 
@@ -1145,6 +1089,7 @@ export default function ProjectFormModal(props) {
                     <button
                       type="button"
                       class="btn-primary"
+                      disabled={isUploadingPhoto()}
                       onClick={handleSaveUnitToProject}
                     >
                       {editingUnitIndex() !== null ? 'Update Unit' : 'Simpan Unit ke Daftar'}
@@ -1166,7 +1111,7 @@ export default function ProjectFormModal(props) {
                     <div class="modal-unit-row">
                       <div class="project-cell">
                         <Show when={unit.photos?.[0]}>
-                          <img src={unit.photos[0]} alt={unit.name} class="project-thumb" />
+                          <img src={unit.photos[0]} alt={unit.name} class="project-thumb" loading="lazy" />
                         </Show>
                         <div>
                           <div class="unit-item-title">
@@ -1213,9 +1158,11 @@ export default function ProjectFormModal(props) {
               <button type="button" class="btn-ghost" onClick={props.onClose}>
                 Batal
               </button>
-              <button type="submit" class="btn-primary" disabled={props.isSaving}>
+              <button type="submit" class="btn-primary" disabled={props.isSaving || isUploadingPhoto()}>
                 {props.isSaving
                   ? 'Menyimpan...'
+                  : isUploadingPhoto()
+                  ? 'Mengunggah Foto...'
                   : props.isEditing
                   ? 'Simpan Perubahan Project'
                   : 'Simpan Project'}

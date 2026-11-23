@@ -125,10 +125,9 @@ export function RichTextContent(props) {
 export function DetailHeroCarousel(props) {
   const [activeIdx, setActiveIdx] = createSignal(0);
 
-  const mediaItems = createMemo(() => {
-    const photoList = (props.photos || []).map((url) => ({ type: 'photo', url }));
-    const videoList = (props.videos || []).map((url) => ({ type: 'video', url }));
-    return [...photoList, ...videoList];
+  const photoItems = createMemo(() => {
+    const list = (props.photos || []).filter(Boolean);
+    return list.length > 0 ? list : [DEFAULT_COVER_IMG];
   });
 
   createEffect(() => {
@@ -136,39 +135,24 @@ export function DetailHeroCarousel(props) {
     setActiveIdx(0);
   });
 
-  const currentMedia = () =>
-    mediaItems()[activeIdx()] || mediaItems()[0] || { type: 'photo', url: DEFAULT_COVER_IMG };
-  const nextMedia = () => setActiveIdx((prev) => (prev + 1) % mediaItems().length);
-  const prevMedia = () =>
-    setActiveIdx((prev) => (prev - 1 + mediaItems().length) % mediaItems().length);
+  const currentPhoto = () => photoItems()[activeIdx()] || photoItems()[0];
+  const nextPhoto = () => setActiveIdx((prev) => (prev + 1) % photoItems().length);
+  const prevPhoto = () =>
+    setActiveIdx((prev) => (prev - 1 + photoItems().length) % photoItems().length);
 
   return (
     <div class="detail-hero-carousel full-bleed">
       <div class="hero-carousel-stage uncropped">
-        <Show
-          when={currentMedia().type === 'video'}
-          fallback={
-            <>
-              <div
-                class="hero-carousel-ambient-bg"
-                style={{ 'background-image': `url("${currentMedia().url}")` }}
-              ></div>
-              <img
-                src={currentMedia().url}
-                class="hero-carousel-main-img uncropped"
-                alt={`${props.title || ''} - Media ${activeIdx() + 1}`}
-              />
-            </>
-          }
-        >
-          <video
-            src={currentMedia().url}
-            class="hero-carousel-main-img uncropped"
-            controls
-            playsInline
-            style={{ background: '#000' }}
-          />
-        </Show>
+        <div
+          class="hero-carousel-ambient-bg"
+          style={{ 'background-image': `url("${currentPhoto()}")` }}
+        ></div>
+        <img
+          src={currentPhoto()}
+          class="hero-carousel-main-img uncropped"
+          alt={`${props.title || ''} - Foto ${activeIdx() + 1}`}
+          decoding="async"
+        />
 
         <div class="hero-carousel-top-badges">
           <span class="hero-badge-location">
@@ -176,55 +160,40 @@ export function DetailHeroCarousel(props) {
             <span>{props.locationBadge}</span>
           </span>
           <span class="hero-badge-counter">
-            {currentMedia().type === 'video' ? t('videoLabel') : t('photoLabel')} {activeIdx() + 1} {t('ofLabel')} {mediaItems().length}
+            {t('photoLabel')} {activeIdx() + 1} {t('ofLabel')} {photoItems().length}
           </span>
         </div>
 
-        <Show when={mediaItems().length > 1}>
+        <Show when={photoItems().length > 1}>
           <div class="hero-carousel-nav-bar">
-            <button type="button" class="hero-nav-pill" onClick={prevMedia}>
+            <button type="button" class="hero-nav-pill" onClick={prevPhoto}>
               {t('prevBtn')}
             </button>
-            <button type="button" class="hero-nav-pill" onClick={nextMedia}>
+            <button type="button" class="hero-nav-pill" onClick={nextPhoto}>
               {t('nextBtn')}
             </button>
           </div>
         </Show>
       </div>
 
-      <Show when={mediaItems().length > 1}>
+      <Show when={photoItems().length > 1}>
         <div class="container">
           <div class="hero-carousel-thumbs">
-            <For each={mediaItems()}>
-              {(item, idx) => (
+            <For each={photoItems()}>
+              {(url, idx) => (
                 <button
                   type="button"
                   class={`hero-thumb-btn ${activeIdx() === idx() ? 'active' : ''}`}
                   onClick={() => setActiveIdx(idx())}
                 >
-                  <Show
-                    when={item.type === 'video'}
-                    fallback={
-                      <img
-                        src={item.url}
-                        alt={props.thumbAltPrefix ? `${props.thumbAltPrefix} Thumb ${idx() + 1}` : `Thumb ${idx() + 1}`}
-                      />
-                    }
-                  >
-                    <video
-                      src={item.url}
-                      muted
-                      preload="metadata"
-                      class="hero-thumb-video"
-                    />
-                  </Show>
-                  <Show when={idx() === 0 && item.type === 'photo'}>
+                  <img
+                    src={url}
+                    alt={props.thumbAltPrefix ? `${props.thumbAltPrefix} Thumb ${idx() + 1}` : `Thumb ${idx() + 1}`}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <Show when={idx() === 0}>
                     <span class="thumb-cover-tag">Cover</span>
-                  </Show>
-                  <Show when={item.type === 'video'}>
-                    <span class="thumb-cover-tag video-tag">
-                      ▶ Video
-                    </span>
                   </Show>
                 </button>
               )}
@@ -233,23 +202,6 @@ export function DetailHeroCarousel(props) {
         </div>
       </Show>
     </div>
-  );
-}
-
-export function DetailVideoSection(props) {
-  return (
-    <Show when={props.videos?.length > 0}>
-      <div class="detail-video-section">
-        <h4 class="detail-video-heading">
-          {props.heading} ({props.videos.length})
-        </h4>
-        <div class="detail-video-grid">
-          <For each={props.videos}>
-            {(vidUrl) => <video src={vidUrl} controls class="detail-video-player" />}
-          </For>
-        </div>
-      </div>
-    </Show>
   );
 }
 
@@ -357,8 +309,6 @@ export default function PropertyDetail(props) {
       ? p.photos
       : [p.img || DEFAULT_COVER_IMG];
   });
-
-  const videos = createMemo(() => (Array.isArray(property().videos) ? property().videos : []));
   const units = createMemo(() => (Array.isArray(property().units) ? property().units : []));
 
   const range = (key, fallbackVal = '-') => {
@@ -394,7 +344,6 @@ export default function PropertyDetail(props) {
 
       <DetailHeroCarousel
         photos={photos()}
-        videos={videos()}
         resetKey={property().id}
         title={property().name}
         locationBadge={publicLocation()}
@@ -500,6 +449,7 @@ export default function PropertyDetail(props) {
                                           src={unitThumb()}
                                           alt={u.name}
                                           class="units-thumb-img"
+                                          loading="lazy"
                                         />
                                       </Show>
                                     </div>

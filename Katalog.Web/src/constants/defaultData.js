@@ -32,7 +32,7 @@ export const createDefaultProjectForm = () => ({
 export const INITIAL_CHAT_GREETING = {
   id: 1,
   sender: 'bot',
-  text: 'Selamat datang di asisten JakUrban AI! Saya dapat membantu Anda menemukan hunian impian di Jakarta beserta simulasi KPR dan ketersediaan unit terbaru.'
+  text: 'Selamat datang di asisten JakHome AI! Saya dapat membantu Anda menemukan hunian impian di Jakarta beserta simulasi KPR dan ketersediaan unit terbaru.'
 };
 
 /**

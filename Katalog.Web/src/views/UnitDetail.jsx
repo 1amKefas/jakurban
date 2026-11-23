@@ -16,19 +16,16 @@ export default function UnitDetail(props) {
   const project = () => props.project || {};
 
   /**
- * Mengambil daftar media (foto/video) milik unit; jika kosong, otomatis memakai media milik project.
+ * Mengambil daftar media (foto) milik unit; jika kosong, otomatis memakai media milik project.
  */
-  const pickUnitOrProjectMedia = (unitList, projectList, fallback = []) => {
+  const pickUnitOrProjectPhotos = (unitList, projectList, fallback = []) => {
     if (Array.isArray(unitList) && unitList.length > 0) return unitList;
     if (Array.isArray(projectList) && projectList.length > 0) return projectList;
     return fallback;
   };
 
   const photos = createMemo(() =>
-    pickUnitOrProjectMedia(unit().photos, project().photos, [project().img || DEFAULT_COVER_IMG])
-  );
-  const videos = createMemo(() =>
-    pickUnitOrProjectMedia(unit().videos, project().videos, [])
+    pickUnitOrProjectPhotos(unit().photos, project().photos, [project().img || DEFAULT_COVER_IMG])
   );
 
   const publicLocation = () => formatPublicLocation(project().location);
@@ -62,7 +59,6 @@ export default function UnitDetail(props) {
 
         <DetailHeroCarousel
           photos={photos()}
-          videos={videos()}
           resetKey={`${unit().id || ''}-${unit().name || ''}`}
           title={unit().name}
           thumbAltPrefix={unit().name}

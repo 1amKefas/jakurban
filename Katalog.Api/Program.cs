@@ -6,6 +6,8 @@ using Katalog.Api.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -40,7 +42,7 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
         {
             o.UseVector();
             o.CommandTimeout(30);
-            o.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(60), errorCodesToAdd: null);
+            o.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorCodesToAdd: null);
         }
     ));
 
@@ -69,7 +71,39 @@ builder.Services.AddSwaggerGen();
 // 4. Registrasi HttpClient untuk layanan Embedding & RAG Chatbot (Gemini AI)
 builder.Services.AddHttpClient<IEmbeddingService, OpenAiEmbeddingService>(client =>
 {
-    client.Timeout = TimeSpan.FromSeconds(25);
+    client.Timeout = TimeSpan.FromSeconds(90);
+});
+
+// 5. MemoryCache (untuk sesi chat dengan TTL agar bebas memory leak)
+builder.Services.AddMemoryCache();
+
+// 6. Rate Limiter khusus endpoint Chatbot (anti-spam & pengaman kuota token)
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, ct) =>
+    {
+        context.HttpContext.Response.ContentType = "application/json; charset=utf-8";
+        await context.HttpContext.Response.WriteAsync(
+            "{\"reply\":\"Permintaan Anda terlalu cepat. Mohon tunggu sebentar sebelum mengirim pesan berikutnya.\"}",
+            ct);
+    };
+
+    options.AddPolicy("chat-limit", httpContext =>
+    {
+        var clientIp =
+            httpContext.Request.Headers["CF-Connecting-IP"].FirstOrDefault()
+            ?? httpContext.Request.Headers["X-Forwarded-For"].FirstOrDefault()?.Split(',')[0].Trim()
+            ?? httpContext.Connection.RemoteIpAddress?.ToString()
+            ?? "unknown";
+
+        return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 8,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0
+        });
+    });
 });
 
 var app = builder.Build();
@@ -131,6 +165,16 @@ using (var scope = app.Services.CreateScope())
                 ""ActiveSessionToken"" text,
                 ""LastActiveAt"" timestamp with time zone
             );
+
+            CREATE TABLE IF NOT EXISTS ""KnowledgeDocuments"" (
+                ""Id"" text PRIMARY KEY,
+                ""Title"" text NOT NULL,
+                ""Category"" text NOT NULL DEFAULT 'SOP / Umum',
+                ""FileName"" text NOT NULL DEFAULT '',
+                ""Content"" text NOT NULL DEFAULT '',
+                ""CreatedAt"" text NOT NULL DEFAULT ''
+            );
+
             INSERT INTO ""UserAccounts"" (""Id"", ""Name"", ""Email"", ""Password"", ""Phone"", ""Slug"", ""Role"", ""Title"", ""CreatedAt"")
             VALUES
                 ('usr-super-1', 'Super Admin (Owner)', 'super@jakurban.com', '123', '6287819112003', 'owner', 'SUPER_ADMIN', 'Principal / Super Admin', '01 Okt 2026, 09:00'),
@@ -152,6 +196,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseRouting();
 app.UseCors("AllowFrontend");
+app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapGet("/", () => Results.Ok(new

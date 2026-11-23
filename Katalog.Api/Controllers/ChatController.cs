@@ -1,11 +1,15 @@
-using System.Collections.Concurrent;
+using System.Data;
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Katalog.Api.Data;
 using Katalog.Api.Models;
 using Katalog.Api.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Katalog.Api.Controllers;
 
@@ -41,38 +45,89 @@ public class ChatController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly IEmbeddingService _embeddingService;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<ChatController> _logger;
 
-    private static readonly ConcurrentDictionary<Guid, List<ChatHistoryItemDto>> _sessionMessages = new();
+    private static long _totalSessionsCreated = 0;
+    private static long _totalMessagesProcessed = 0;
 
-    private static readonly string _kbFilePath = Path.Combine(AppContext.BaseDirectory, "knowledge-base.json");
-    private static List<KnowledgeDocDto>? _cachedKbDocs;
-    private static readonly object _kbLock = new();
+    private static readonly JsonSerializerOptions SseJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
-    // Cache daftar Project & Unit (tanpa foto/video Base64) di RAM agar pengambilan konteks instan (0ms)
+    // Cache daftar Project & Unit (tanpa foto/video) di RAM agar pengambilan konteks instan
     private static List<Project>? _cachedProjects;
     private static DateTime _projectsCacheExpiry = DateTime.MinValue;
     private static readonly SemaphoreSlim _projectCacheLock = new(1, 1);
 
-    public static void InvalidateProjectCache()
+    // Cache Knowledge Base dari PostgreSQL di RAM selama 60 detik
+    private static List<KnowledgeDocDto>? _cachedKbDocs;
+    private static DateTime _kbCacheExpiry = DateTime.MinValue;
+    private static readonly SemaphoreSlim _kbCacheLock = new(1, 1);
+
+    public ChatController(
+        ApplicationDbContext context,
+        IEmbeddingService embeddingService,
+        IMemoryCache cache,
+        ILogger<ChatController> logger)
     {
-        _projectsCacheExpiry = DateTime.MinValue;
+        _context = context;
+        _embeddingService = embeddingService;
+        _cache = cache;
+        _logger = logger;
+    }
+
+    public static void InvalidateProjectCache() => _projectsCacheExpiry = DateTime.MinValue;
+    private static void InvalidateKbCache() => _kbCacheExpiry = DateTime.MinValue;
+
+    private static string SessionCacheKey(Guid sessionId) => $"chat_session:{sessionId:N}";
+
+    private List<ChatHistoryItemDto> GetOrCreateSessionHistory(Guid sessionId)
+    {
+        var key = SessionCacheKey(sessionId);
+        if (_cache.TryGetValue(key, out List<ChatHistoryItemDto>? existing) && existing != null)
+            return existing;
+
+        var created = new List<ChatHistoryItemDto>();
+        _cache.Set(key, created, new MemoryCacheEntryOptions
+        {
+            SlidingExpiration = TimeSpan.FromHours(2),
+            AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6)
+        });
+        Interlocked.Increment(ref _totalSessionsCreated);
+        return created;
+    }
+
+    private static void AppendMessageBounded(List<ChatHistoryItemDto> history, ChatHistoryItemDto item)
+    {
+        history.Add(item);
+        const int maxMessagesPerSession = 24;
+        if (history.Count > maxMessagesPerSession)
+        {
+            history.RemoveRange(0, history.Count - maxMessagesPerSession);
+        }
+        Interlocked.Increment(ref _totalMessagesProcessed);
+    }
+
+    private static void AddDbParam(IDbCommand cmd, string name, object? value)
+    {
+        var p = cmd.CreateParameter();
+        p.ParameterName = name;
+        p.Value = value ?? DBNull.Value;
+        cmd.Parameters.Add(p);
     }
 
     private async Task<List<Project>> GetProjectsFastAsync()
     {
         if (_cachedProjects != null && DateTime.UtcNow < _projectsCacheExpiry)
-        {
             return _cachedProjects;
-        }
 
         await _projectCacheLock.WaitAsync();
         try
         {
             if (_cachedProjects != null && DateTime.UtcNow < _projectsCacheExpiry)
-            {
                 return _cachedProjects;
-            }
 
             var freshProjects = await _context.Projects
                 .AsNoTracking()
@@ -108,7 +163,7 @@ public class ChatController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Menggunakan cache memori karena koneksi DB lambat/timeout: {Msg}", ex.Message);
+            _logger.LogWarning("Menggunakan cache memori proyek karena DB timeout: {Msg}", ex.Message);
             return _cachedProjects ?? new List<Project>();
         }
         finally
@@ -117,61 +172,59 @@ public class ChatController : ControllerBase
         }
     }
 
-    private static List<KnowledgeDocDto> LoadKnowledgeDocs()
+    private async Task<List<KnowledgeDocDto>> LoadKnowledgeDocsAsync()
     {
-        lock (_kbLock)
-        {
-            if (_cachedKbDocs != null) return _cachedKbDocs;
-            try
-            {
-                if (System.IO.File.Exists(_kbFilePath))
-                {
-                    var raw = System.IO.File.ReadAllText(_kbFilePath);
-                    _cachedKbDocs = System.Text.Json.JsonSerializer.Deserialize<List<KnowledgeDocDto>>(raw) ?? new();
-                    return _cachedKbDocs;
-                }
-            }
-            catch { }
-            _cachedKbDocs = new List<KnowledgeDocDto>();
+        if (_cachedKbDocs != null && DateTime.UtcNow < _kbCacheExpiry)
             return _cachedKbDocs;
-        }
-    }
 
-    private static void SaveKnowledgeDocs(List<KnowledgeDocDto> docs)
-    {
-        lock (_kbLock)
+        await _kbCacheLock.WaitAsync();
+        try
         {
-            _cachedKbDocs = docs;
-            try
-            {
-                var json = System.Text.Json.JsonSerializer.Serialize(docs, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-                System.IO.File.WriteAllText(_kbFilePath, json);
-            }
-            catch { }
-        }
-    }
+            if (_cachedKbDocs != null && DateTime.UtcNow < _kbCacheExpiry)
+                return _cachedKbDocs;
 
-    public ChatController(
-        ApplicationDbContext context,
-        IEmbeddingService embeddingService,
-        ILogger<ChatController> logger)
-    {
-        _context = context;
-        _embeddingService = embeddingService;
-        _logger = logger;
+            var docs = new List<KnowledgeDocDto>();
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"SELECT ""Id"", ""Title"", ""Category"", ""FileName"", ""Content"", ""CreatedAt"" FROM ""KnowledgeDocuments"" ORDER BY ""Id"" DESC;";
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                docs.Add(new KnowledgeDocDto
+                {
+                    Id = reader.GetString(0),
+                    Title = reader.GetString(1),
+                    Category = reader.IsDBNull(2) ? "SOP / Umum" : reader.GetString(2),
+                    FileName = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    Content = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                    CreatedAt = reader.IsDBNull(5) ? "" : reader.GetString(5)
+                });
+            }
+
+            _cachedKbDocs = docs;
+            _kbCacheExpiry = DateTime.UtcNow.AddSeconds(60);
+            return docs;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Gagal membaca KnowledgeDocuments dari PostgreSQL: {Msg}", ex.Message);
+            return _cachedKbDocs ?? new List<KnowledgeDocDto>();
+        }
+        finally
+        {
+            _kbCacheLock.Release();
+        }
     }
 
     private static decimal NormalizeUnitPrice(decimal rawPrice)
     {
         if (rawPrice <= 0) return 0;
         if (rawPrice < 100m)
-        {
             return rawPrice <= 25m ? rawPrice * 100_000_000m : rawPrice * 10_000_000m;
-        }
         if (rawPrice < 100_000m)
-        {
             return rawPrice * 1_000_000m;
-        }
         return rawPrice;
     }
 
@@ -189,17 +242,8 @@ public class ChatController : ControllerBase
     {
         var price = NormalizeUnitPrice(rawPrice);
         if (price <= 0) return "Hubungi Marketing";
-
-        if (price >= 1_000_000_000m)
-        {
-            return $"Rp {FormatThreeMainDigits(price / 1_000_000_000m)} Miliar";
-        }
-
-        if (price >= 1_000_000m)
-        {
-            return $"Rp {FormatThreeMainDigits(price / 1_000_000m)} Juta";
-        }
-
+        if (price >= 1_000_000_000m) return $"Rp {FormatThreeMainDigits(price / 1_000_000_000m)} Miliar";
+        if (price >= 1_000_000m) return $"Rp {FormatThreeMainDigits(price / 1_000_000m)} Juta";
         return string.Format(new CultureInfo("id-ID"), "Rp {0:N0}", price);
     }
 
@@ -211,7 +255,6 @@ public class ChatController : ControllerBase
             .ToList();
 
         if (!validPrices.Any()) return "Hubungi Marketing";
-
         var min = validPrices.Min();
         var max = validPrices.Max();
 
@@ -235,59 +278,45 @@ public class ChatController : ControllerBase
     [HttpGet("{sessionId:guid}")]
     public IActionResult GetSessionHistory(Guid sessionId)
     {
-        if (_sessionMessages.TryGetValue(sessionId, out var history))
+        if (_cache.TryGetValue(SessionCacheKey(sessionId), out List<ChatHistoryItemDto>? history) && history != null)
         {
             lock (history)
             {
-                return Ok(new
-                {
-                    sessionId,
-                    messages = history.ToList()
-                });
+                return Ok(new { sessionId, messages = history.ToList() });
             }
         }
 
-        return Ok(new
-        {
-            sessionId,
-            messages = new List<ChatHistoryItemDto>()
-        });
+        return Ok(new { sessionId, messages = new List<ChatHistoryItemDto>() });
     }
 
     [HttpDelete("{sessionId:guid}")]
     public IActionResult ClearSessionHistory(Guid sessionId)
     {
-        _sessionMessages.TryRemove(sessionId, out _);
+        _cache.Remove(SessionCacheKey(sessionId));
         return Ok(new { sessionId, cleared = true });
     }
 
     [HttpGet("stats")]
     public IActionResult GetChatStats()
     {
-        var totalSessions = _sessionMessages.Count;
-        var totalMessages = _sessionMessages.Values.Sum(list =>
-        {
-            lock (list) { return list.Count; }
-        });
-
         return Ok(new
         {
-            totalSessions,
-            totalMessages
+            totalSessions = Interlocked.Read(ref _totalSessionsCreated),
+            totalMessages = Interlocked.Read(ref _totalMessagesProcessed)
         });
     }
 
     [HttpGet("knowledge")]
-    public IActionResult GetKnowledgeBase()
+    public async Task<IActionResult> GetKnowledgeBase()
     {
-        var docs = LoadKnowledgeDocs()
+        var docs = (await LoadKnowledgeDocsAsync())
             .Select(d => new { d.Id, d.Title, d.Category, d.FileName, d.Content, d.CreatedAt, hasVector = true })
             .ToList();
         return Ok(docs);
     }
 
     [HttpPost("knowledge")]
-    public IActionResult AddKnowledgeDoc([FromBody] KnowledgeDocDto dto)
+    public async Task<IActionResult> AddKnowledgeDoc([FromBody] KnowledgeDocDto dto)
     {
         if (string.IsNullOrWhiteSpace(dto.Title) || string.IsNullOrWhiteSpace(dto.Content))
             return BadRequest(new { message = "Judul dan isi dokumen wajib diisi." });
@@ -299,36 +328,138 @@ public class ChatController : ControllerBase
             Category = string.IsNullOrWhiteSpace(dto.Category) ? "Dokumen Perusahaan" : dto.Category.Trim(),
             FileName = dto.FileName ?? "",
             Content = dto.Content.Trim(),
-            CreatedAt = DateTime.Now.ToString("dd MMM yyyy, HH:mm"),
-            Embedding = null
+            CreatedAt = DateTime.Now.ToString("dd MMM yyyy, HH:mm")
         };
 
-        var current = LoadKnowledgeDocs().ToList();
-        current.Insert(0, newDoc);
-        SaveKnowledgeDocs(current);
+        var conn = _context.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO ""KnowledgeDocuments"" (""Id"", ""Title"", ""Category"", ""FileName"", ""Content"", ""CreatedAt"")
+            VALUES (@id, @title, @cat, @file, @content, @createdAt);";
+        AddDbParam(cmd, "@id", newDoc.Id);
+        AddDbParam(cmd, "@title", newDoc.Title);
+        AddDbParam(cmd, "@cat", newDoc.Category);
+        AddDbParam(cmd, "@file", newDoc.FileName);
+        AddDbParam(cmd, "@content", newDoc.Content);
+        AddDbParam(cmd, "@createdAt", newDoc.CreatedAt);
+        await cmd.ExecuteNonQueryAsync();
+
+        InvalidateKbCache();
         return Ok(new { newDoc.Id, newDoc.Title, newDoc.Category, newDoc.FileName, newDoc.Content, newDoc.CreatedAt, hasVector = true });
     }
 
     [HttpDelete("knowledge/{id}")]
-    public IActionResult DeleteKnowledgeDoc(string id)
+    public async Task<IActionResult> DeleteKnowledgeDoc(string id)
     {
-        var current = LoadKnowledgeDocs().Where(d => d.Id != id).ToList();
-        SaveKnowledgeDocs(current);
+        var conn = _context.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"DELETE FROM ""KnowledgeDocuments"" WHERE ""Id"" = @id;";
+        AddDbParam(cmd, "@id", id);
+        await cmd.ExecuteNonQueryAsync();
+
+        InvalidateKbCache();
         return Ok(new { deleted = true, id });
     }
 
-    [HttpPost]
-    public async Task<IActionResult> PostChat([FromBody] ChatRequestDto request)
+    private string BuildSystemPrompt(List<Project> projects, List<KnowledgeDocDto> validKbDocs)
+    {
+        var catalogSectionLines = new List<string>();
+        foreach (var p in projects)
+        {
+            var cleanLoc = FormatKecamatanLocation(p.Location);
+            var projRange = GetProjectPriceRangeText(p);
+            catalogSectionLines.Add($"Cluster: {p.Name} | Lokasi: {cleanLoc} | Harga: {projRange} | Info: {p.Description}");
+            foreach (var u in p.Properties)
+            {
+                catalogSectionLines.Add(
+                    $"  - Unit {u.Title}: {FormatCompactRupiah(u.Price)} (Rp {NormalizeUnitPrice(u.Price):N0}), " +
+                    $"LT {u.LandArea}m², LB {u.BuildArea}m², {u.Beds} KT, {u.Baths} KM, Status: {u.Status}. {u.Description}");
+            }
+        }
+
+        const int maxKbCharsTotal = 2800;
+        var currentKbChars = 0;
+        var kbSectionLines = new List<string>();
+
+        foreach (var doc in validKbDocs.Take(3))
+        {
+            var remaining = maxKbCharsTotal - currentKbChars;
+            if (remaining <= 200) break;
+
+            var clippedContent = doc.Content.Length > remaining
+                ? doc.Content[..remaining] + "\n...(ringkasan)"
+                : doc.Content;
+
+            kbSectionLines.Add($"[Dokumen: {doc.Title} ({doc.Category})]:\n{clippedContent}");
+            currentKbChars += clippedContent.Length;
+        }
+
+        var fullRagContext =
+            "=== KATALOG JAKHOME / JAKURBAN ===\n" +
+            (catalogSectionLines.Any() ? string.Join("\n", catalogSectionLines) : "Belum ada unit di katalog.") +
+            (kbSectionLines.Any() ? "\n\n=== KNOWLEDGE BASE RESMI ===\n" + string.Join("\n\n", kbSectionLines) : "");
+
+        var todayText = DateTime.Now.ToString("dd MMMM yyyy", new CultureInfo("id-ID"));
+
+        return $@"Kamu adalah JakUrban AI, konsultan properti virtual resmi dari JakHome / JakUrban (PT XYZ).
+Tanggal hari ini: {todayText}.
+
+Cara Berkomunikasi:
+- Balas mengikuti bahasa pesan terakhir user (Bahasa Indonesia, Bahasa Inggris, atau bahasa lain yang digunakan user) secara natural, santai, ramah, dan tidak kaku.
+- Jika user menyapa atau basa-basi ('halo', 'wassup', 'how u doin'), balas dengan akrab dulu lalu tawarkan bantuan seputar pencarian hunian secara halus.
+- Gunakan penalaran konsultatif untuk membantu user (analisis budget/gaji dengan cicilan ideal ~30-35% penghasilan, lokasi kerja, kebutuhan kamar, dan simulasi KPR default DP 30%, plafon 70%, bunga efektif 7.5%/tahun, tenor 15 & 20 tahun).
+
+Kebijakan Mata Uang — KHUSUS RUPIAH (WAJIB DIPATUHI):
+- Seluruh harga properti, DP, plafon, dan simulasi KPR di JakHome / JakUrban HANYA disajikan dan dihitung dalam mata uang Rupiah (Rp / IDR), apa pun bahasa yang digunakan user.
+- DILARANG KERAS mengonversi, menaksir, atau memperkirakan kurs ke/dari mata uang asing mana pun (USD/$, SGD, MYR/RM, EUR, GBP, AUD, JPY, CNY, dll.) bahkan perkiraan kasar sekalipun.
+- Jika user meminta harga dalam mata uang asing, tolak konversinya dengan sopan lalu tetap sebutkan harga resminya dalam Rupiah (Rp / IDR).
+- Jika user menyebutkan budget/gaji dalam mata uang asing, JANGAN mengonversinya sendiri; jelaskan bahwa simulasi hanya mendukung Rupiah (Rp / IDR) lalu minta user menyebutkan nominalnya dalam Rupiah.
+
+Batasan Peran & Fakta (Wajib Dipatuhi):
+- Ruang lingkupmu HANYA properti, perumahan, cluster, lokasi Jakarta, pricelist, legalitas rumah, dan KPR.
+- Jika user bertanya topik di luar perumahan/properti (seperti makanan/resep, politik/presiden, koding, hiburan, olahraga, cuaca, atau pengetahuan umum), JANGAN menjawab isi pertanyaan tersebut; tolak dengan santai dalam 1-2 kalimat lalu arahkan kembali ke topik hunian.
+- Gunakan hanya fakta dari [KONTEKS RAG] di bawah. Dilarang mengarang unit, harga, atau diskon fiktif; untuk negosiasi harga final atau jadwal survei, arahkan ke WhatsApp Marketing Resmi +62 878 1911 2003.
+
+Aturan Format Tampilan (Wajib Dipatuhi):
+- Gunakan format Markdown standar agar UI merendernya dengan rapi: pakai **teks tebal** untuk harga, nama unit, atau angka penting; pakai subjudul ### untuk memisahkan bagian; dan pakai tabel Markdown (| Kolom 1 | Kolom 2 |) saat menampilkan simulasi KPR, daftar pricelist, atau perbandingan beberapa unit.
+- Gunakan daftar bernomor (1., 2., 3.) atau poin standar bila perlu, dan HINDARI tanda pisah panjang khas AI (— atau –) di tengah kalimat; cukup gunakan koma atau titik.
+- Jangan pernah menuliskan simbol mata uang asing seperti ""$"" (bahkan di samping IDR); selalu tulis ""Rp"" atau ""IDR"".
+
+[KONTEKS RAG]:
+{fullRagContext}";
+    }
+
+    private async Task WriteSseEventAsync(object payload, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(payload, SseJsonOptions);
+        await Response.WriteAsync($"data: {json}\n\n", ct);
+        await Response.Body.FlushAsync(ct);
+    }
+
+    [HttpPost("stream")]
+    [EnableRateLimiting("chat-limit")]
+    public async Task PostChatStream([FromBody] ChatRequestDto request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Message))
-            return BadRequest(new { reply = "Pesan tidak boleh kosong." });
+        {
+            Response.StatusCode = 400;
+            return;
+        }
+
+        Response.StatusCode = 200;
+        Response.ContentType = "text/event-stream; charset=utf-8";
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers["X-Accel-Buffering"] = "no";
 
         var sessionId = request.SessionId == null || request.SessionId == Guid.Empty
             ? Guid.NewGuid()
             : request.SessionId.Value;
 
-        var history = _sessionMessages.GetOrAdd(sessionId, _ => new List<ChatHistoryItemDto>());
+        var history = GetOrCreateSessionHistory(sessionId);
         List<ChatTurnDto> previousTurns;
 
         lock (history)
@@ -339,7 +470,7 @@ public class ChatController : ControllerBase
                 Content = h.Text
             }).ToList();
 
-            history.Add(new ChatHistoryItemDto
+            AppendMessageBounded(history, new ChatHistoryItemDto
             {
                 Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 Sender = "user",
@@ -348,102 +479,156 @@ public class ChatController : ControllerBase
             });
         }
 
-        // 1. Ambil seluruh data proyek/unit dari memori (0ms) dan seluruh dokumen Knowledge Base
         var projects = await GetProjectsFastAsync();
-        var validKbDocs = LoadKnowledgeDocs()
+        var validKbDocs = (await LoadKnowledgeDocsAsync())
             .Where(d => !string.IsNullOrWhiteSpace(d.Content) &&
                         !d.Content.TrimStart().StartsWith("[Lampiran File:", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        var catalogSectionLines = new List<string>();
-        foreach (var p in projects)
+        var systemPrompt = BuildSystemPrompt(projects, validKbDocs);
+        var fullReplyBuilder = new StringBuilder();
+        var isFromLlm = false;
+
+        try
         {
-            var cleanLoc = FormatKecamatanLocation(p.Location);
-            var projRange = GetProjectPriceRangeText(p);
-            catalogSectionLines.Add($"Cluster/Project: {p.Name} | Lokasi: {cleanLoc} | Kisaran Harga: {projRange} | Deskripsi: {p.Description}");
-            foreach (var u in p.Properties)
+            await foreach (var token in _embeddingService.StreamChatCompletionAsync(
+                systemPrompt,
+                request.Message,
+                previousTurns,
+                cancellationToken))
             {
-                catalogSectionLines.Add(
-                    $"  - Unit {u.Title}: Harga {FormatCompactRupiah(u.Price)} (Nominal: Rp {NormalizeUnitPrice(u.Price):N0}), " +
-                    $"LT {u.LandArea}m², LB {u.BuildArea}m², {u.Beds} Kamar Tidur (KT), {u.Baths} Kamar Mandi (KM), Status: {u.Status}. Detail: {u.Description}");
+                isFromLlm = true;
+                fullReplyBuilder.Append(token);
+                await WriteSseEventAsync(new { type = "token", text = token }, cancellationToken);
+            }
+
+            if (!isFromLlm)
+            {
+                var backupText = BuildNaturalBackupReply(request.Message, projects, validKbDocs);
+                fullReplyBuilder.Append(backupText);
+                await WriteSseEventAsync(new { type = "token", text = backupText }, cancellationToken);
+            }
+
+            var finalReply = fullReplyBuilder.ToString().Trim();
+            var recommendedUnits = ExtractMentionedUnitCards(finalReply, projects);
+
+            lock (history)
+            {
+                AppendMessageBounded(history, new ChatHistoryItemDto
+                {
+                    Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1,
+                    Sender = "bot",
+                    Text = finalReply,
+                    Timestamp = DateTime.UtcNow,
+                    Recommendations = recommendedUnits
+                });
+            }
+
+            await WriteSseEventAsync(new
+            {
+                type = "done",
+                sessionId,
+                recommendations = recommendedUnits,
+                ragMode = isFromLlm ? "llm-stream-rag" : "backup-conversational-engine"
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            var partialReply = fullReplyBuilder.ToString().Trim();
+            if (!string.IsNullOrWhiteSpace(partialReply))
+            {
+                lock (history)
+                {
+                    AppendMessageBounded(history, new ChatHistoryItemDto
+                    {
+                        Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1,
+                        Sender = "bot",
+                        Text = partialReply,
+                        Timestamp = DateTime.UtcNow
+                    });
+                }
             }
         }
+    }
 
-        var kbSectionLines = validKbDocs
-            .Select(d => $"[Dokumen Knowledge Base: {d.Title} ({d.Category})]:\n{d.Content}")
+    [HttpPost]
+    [EnableRateLimiting("chat-limit")]
+    public async Task<IActionResult> PostChat([FromBody] ChatRequestDto request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Message))
+            return BadRequest(new { reply = "Pesan tidak boleh kosong." });
+
+        var sessionId = request.SessionId == null || request.SessionId == Guid.Empty
+            ? Guid.NewGuid()
+            : request.SessionId.Value;
+
+        var history = GetOrCreateSessionHistory(sessionId);
+        List<ChatTurnDto> previousTurns;
+
+        lock (history)
+        {
+            previousTurns = history.Select(h => new ChatTurnDto
+            {
+                Role = h.Sender == "user" ? "user" : "assistant",
+                Content = h.Text
+            }).ToList();
+
+            AppendMessageBounded(history, new ChatHistoryItemDto
+            {
+                Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Sender = "user",
+                Text = request.Message.Trim(),
+                Timestamp = DateTime.UtcNow
+            });
+        }
+
+        var projects = await GetProjectsFastAsync();
+        var validKbDocs = (await LoadKnowledgeDocsAsync())
+            .Where(d => !string.IsNullOrWhiteSpace(d.Content) &&
+                        !d.Content.TrimStart().StartsWith("[Lampiran File:", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        var fullRagContext =
-            "=== DATA KATALOG PROPERTI JAKURBAN ===\n" +
-            (catalogSectionLines.Any() ? string.Join("\n", catalogSectionLines) : "Belum ada unit di tabel katalog utama.") +
-            (kbSectionLines.Any() ? "\n\n=== DOKUMEN RESMI & PRICELIST PERUSAHAAN (KNOWLEDGE BASE) ===\n" + string.Join("\n\n", kbSectionLines) : "");
-
-        // 2. System Instruction yang memberi kebebasan penuh kepada LLM untuk mengobrol dan bernalar secara natural
-        var systemPrompt = $@"Kamu adalah JakUrban AI, asisten dan teman diskusi properti cerdas dari JakUrban (PT XYZ).
-Berbicaralah secara natural, santai namun sopan, luwes, cerdas, dan ekspresif persis seperti LLM modern (seperti Gemini/ChatGPT) yang sedang mengobrol langsung dengan manusia—JANGAN menggunakan kalimat template yang kaku atau berulang-ulang.
-
-Panduan Perilaku & Penalaran (Light Conversation & Reasoning):
-- Kamu bebas mengobrol santai (light conversation), menanggapi candaan, sapaan, curhatan, atau diskusi terbuka dengan hangat.
-- Gunakan kemampuan penalaranmu (light reasoning) untuk membantu user berpikir: misalnya menganalisis kecocokan gaji/budget mereka dengan harga rumah, membandingkan kelebihan lokasi antar-cluster terhadap tempat kerja user, memberi saran tipe rumah untuk keluarga muda/pasangan baru, atau menghitung simulasi KPR (default bunga efektif 7.5% per tahun, DP 30%, tenor 15-20 tahun, atau sesuai angka DP/tenor yang diminta user).
-- Gunakan informasi dari [KONTEKS RAG JAKURBAN] di bawah (baik dari Data Katalog maupun Dokumen Knowledge Base/Pricelist) sebagai dasar fakta properti yang kamu miliki. Jika di Knowledge Base ada daftar unit/pricelist tambahan, jelaskan juga dengan lengkap.
-- Jangan mengarang unit fiktif atau diskon fiktif yang tidak ada di konteks. Untuk negosiasi harga final atau jadwal survei lokasi, infokan bahwa user bisa menghubungi WhatsApp Marketing Resmi di +62 878 1911 2003.
-- Ikuti bahasa yang dipakai user (Bahasa Indonesia atau Bahasa Inggris), dan hindari penggunaan tanda bintang ganda (**).
-
-[KONTEKS RAG JAKURBAN]:
-{fullRagContext}";
-
-        // 3. Murni panggil LLM untuk SEMUA pesan tanpa terkecuali!
+        var systemPrompt = BuildSystemPrompt(projects, validKbDocs);
         var llmReply = await _embeddingService.GenerateChatCompletionAsync(
             systemPrompt,
             request.Message,
             previousTurns);
 
-        if (string.IsNullOrWhiteSpace(llmReply))
-        {
-            llmReply = BuildNaturalBackupReply(request.Message, projects, validKbDocs);
-        }
+        var isFromLlm = !string.IsNullOrWhiteSpace(llmReply);
+        var finalReply = isFromLlm
+            ? llmReply!
+            : BuildNaturalBackupReply(request.Message, projects, validKbDocs);
 
-        // 4. Tampilkan kartu unit di bawah chat HANYA jika jawaban LLM memang sedang membahas/merekomendasikan unit tersebut
-        var recommendedUnits = ExtractMentionedUnitCards(request.Message, llmReply, projects);
-
-        var botMessage = new ChatHistoryItemDto
-        {
-            Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1,
-            Sender = "bot",
-            Text = llmReply,
-            Timestamp = DateTime.UtcNow,
-            Recommendations = recommendedUnits
-        };
+        var recommendedUnits = ExtractMentionedUnitCards(finalReply, projects);
 
         lock (history)
         {
-            history.Add(botMessage);
+            AppendMessageBounded(history, new ChatHistoryItemDto
+            {
+                Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1,
+                Sender = "bot",
+                Text = finalReply,
+                Timestamp = DateTime.UtcNow,
+                Recommendations = recommendedUnits
+            });
         }
 
         return Ok(new
         {
             sessionId,
-            reply = llmReply,
+            reply = finalReply,
             recommendations = recommendedUnits,
             historyCount = history.Count,
-            ragMode = "pure-gemini-llm-rag"
+            ragMode = isFromLlm ? "llm-rag" : "backup-conversational-engine"
         });
     }
 
-    /// <summary>
-    /// Menampilkan kartu unit di UI hanya untuk unit atau cluster yang benar-benar disebut di dalam percakapan LLM.
-    /// </summary>
-    private static List<object> ExtractMentionedUnitCards(string userMsg, string llmReply, List<Project> projects)
+    private static List<object> ExtractMentionedUnitCards(string llmReply, List<Project> projects)
     {
         var cards = new List<object>();
-        var combinedText = $"{userMsg} {llmReply}".ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(llmReply)) return cards;
 
-        // Jangan tampilkan kartu jika pesan user sangat pendek berupa sapaan murni
-        var cleanUser = Regex.Replace(userMsg.ToLowerInvariant(), @"[^a-z0-9\s]", "").Trim();
-        if (cleanUser is "halo" or "hai" or "hi" or "hello" or "pagi" or "siang" or "sore" or "malam" or "tes" or "test" or "p")
-        {
-            return cards;
-        }
+        var replyLower = llmReply.ToLowerInvariant();
 
         foreach (var p in projects)
         {
@@ -454,7 +639,7 @@ Panduan Perilaku & Penalaran (Light Conversation & Reasoning):
                 .Where(w => w.Length > 2 && w != "cluster" && w != "project" && w != "residence")
                 .ToList();
 
-            bool projectMentioned = projWords.Any() && projWords.All(pw => combinedText.Contains(pw));
+            bool projectMentioned = projWords.Any() && projWords.All(pw => replyLower.Contains(pw));
 
             foreach (var u in p.Properties)
             {
@@ -492,60 +677,25 @@ Panduan Perilaku & Penalaran (Light Conversation & Reasoning):
         List<Project> projects,
         List<KnowledgeDocDto> validKbDocs)
     {
-        var q = userMessage.ToLowerInvariant().Trim();
-
-        // Sapaan atau obrolan pembuka
-        if (q.Length <= 20 && (q.Contains("halo") || q.Contains("hai") || q.Contains("hi") || q.Contains("pagi") || q.Contains("siang") || q.Contains("sore") || q.Contains("malam") || q.Contains("bro") || q.Contains("kak")))
-        {
-            var clusterNames = projects.Any()
-                ? string.Join(", ", projects.Select(p => $"{p.Name} ({FormatKecamatanLocation(p.Location)})"))
-                : "Jakarta";
-            return $"Halo! Senang bisa ngobrol sama kamu di JakUrban AI. Saat ini kita punya pilihan hunian menarik di {clusterNames}. Kamu lagi nyari rumah di daerah mana nih, atau udah ada bayangan budget dan jumlah kamar yang dibutuhin?";
-        }
-
-        // Jika menanyakan KPR / cicilan / gaji
-        if (q.Contains("kpr") || q.Contains("cicil") || q.Contains("dp") || q.Contains("gaji") || q.Contains("angsuran"))
-        {
-            var firstUnit = projects.SelectMany(p => p.Properties.Select(u => new { Project = p, Unit = u }))
-                .FirstOrDefault(x => NormalizeUnitPrice(x.Unit.Price) > 0);
-
-            if (firstUnit != null)
-            {
-                decimal price = NormalizeUnitPrice(firstUnit.Unit.Price);
-                decimal dp = price * 0.30m;
-                decimal loan = price - dp;
-                double r = 0.075 / 12.0;
-                decimal monthly20 = (decimal)((double)loan * (r * Math.Pow(1 + r, 240)) / (Math.Pow(1 + r, 240) - 1));
-                decimal monthly15 = (decimal)((double)loan * (r * Math.Pow(1 + r, 180)) / (Math.Pow(1 + r, 180) - 1));
-
-                return $"Kalau kita hitung simulasi KPR untuk {firstUnit.Unit.Title} di {firstUnit.Project.Name} (harga {FormatCompactRupiah(price)}), dengan DP 30% ({FormatCompactRupiah(dp)}) dan plafon pinjaman 70% ({FormatCompactRupiah(loan)}) di bunga efektif 7.5% per tahun:\n\n" +
-                       $"- Tenor 15 tahun: sekitar {FormatCompactRupiah(Math.Round(monthly15, 0))} per bulan\n" +
-                       $"- Tenor 20 tahun: sekitar {FormatCompactRupiah(Math.Round(monthly20, 0))} per bulan\n\n" +
-                       $"Supaya cashflow bulanan tetap nyaman (sekitar 30-35% dari penghasilan), cicilan ini pas banget kalau penghasilan bulanan ada di kisaran {FormatCompactRupiah(Math.Round(monthly20 / 0.35m, 0))}. Gimana menurutmu, mau kita bandingkan dengan skema DP yang berbeda?";
-            }
-        }
-
-        // Jawaban natural yang merangkum unit katalog + isi dokumen Pricelist Knowledge Base
         var summaryParts = new List<string>();
         foreach (var p in projects)
         {
             var loc = FormatKecamatanLocation(p.Location);
             var unitsText = string.Join("\n", p.Properties.Select(u =>
-                $"- {u.Title}: {FormatCompactRupiah(u.Price)} (LT {u.LandArea}m² / LB {u.BuildArea}m², {u.Beds} KT, {u.Baths} KM, Status: {u.Status})"));
-            summaryParts.Add($"Untuk {p.Name} di area {loc} (kisaran {GetProjectPriceRangeText(p)}), opsi di katalog utama kita meliputi:\n{unitsText}");
+                $"- **{u.Title}**: {FormatCompactRupiah(u.Price)} (LT {u.LandArea}m² / LB {u.BuildArea}m², {u.Beds} KT, {u.Baths} KM, Status: {u.Status})"));
+            summaryParts.Add($"Untuk **{p.Name}** di area {loc} (kisaran {GetProjectPriceRangeText(p)}), opsi di katalog utama meliputi:\n{unitsText}");
         }
 
         if (validKbDocs.Any())
         {
             foreach (var doc in validKbDocs.Take(2))
             {
-                summaryParts.Add($"Info dari dokumen {doc.Title} ({doc.Category}):\n{doc.Content}");
+                summaryParts.Add($"Info dari dokumen **{doc.Title}** ({doc.Category}):\n{doc.Content}");
             }
         }
 
         return summaryParts.Any()
-            ? string.Join("\n\n", summaryParts) + "\n\nKira-kira dari pilihan di atas, mana yang paling mendekati kriteria rumah yang lagi kamu cari?"
-            : "Saat ini data unit masih disiapkan di katalog. Kamu lagi fokus cari hunian di daerah Jakarta mana dan kisaran budget berapa?";
+            ? string.Join("\n\n", summaryParts) + "\n\nKira-kira dari pilihan di atas, mana yang paling mendekati kriteria rumah yang sedang Anda cari?"
+            : "Saat ini data unit sedang disiapkan di katalog. Anda sedang fokus mencari hunian di area Jakarta mana dan kisaran budget berapa?";
     }
-
 }

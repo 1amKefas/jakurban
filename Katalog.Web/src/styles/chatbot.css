@@ -574,3 +574,124 @@
     padding: 10px 14px;
   }
 }
+
+/* ===== CHATBOT RICH MARKDOWN FORMATTING ===== */
+.chat-md-root {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.chat-md-paragraph {
+  margin: 0;
+}
+
+.chat-md-bold {
+  font-weight: 700;
+  color: inherit;
+}
+
+.chat-md-italic {
+  font-style: italic;
+}
+
+.chat-md-code {
+  background: rgba(15, 23, 42, 0.07);
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.chat-md-link {
+  color: #0284c7;
+  text-decoration: underline;
+  font-weight: 500;
+}
+
+.chat-md-heading {
+  font-weight: 700;
+  color: #0f172a;
+  margin-top: 6px;
+  line-height: 1.35;
+}
+
+.chat-md-heading.level-1,
+.chat-md-heading.level-2 {
+  font-size: 1.08rem;
+}
+
+.chat-md-heading.level-3 {
+  font-size: 1rem;
+}
+
+.chat-md-heading.level-4 {
+  font-size: 0.95rem;
+  color: #1e293b;
+}
+
+.chat-md-hr {
+  border: 0;
+  border-top: 1px solid #e2e8f0;
+  margin: 4px 0;
+}
+
+.chat-md-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-md-list li {
+  padding-left: 2px;
+}
+
+.chat-md-list li.nested-item {
+  margin-left: 18px;
+  list-style-type: circle;
+}
+
+/* Tabel Markdown Responsif */
+.chat-md-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  margin: 4px 0;
+}
+
+.chat-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  text-align: left;
+}
+
+.chat-md-table th {
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 700;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.chat-md-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+  vertical-align: top;
+}
+
+.chat-md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.chat-md-table tbody tr:hover {
+  background: #f8fafc;
+}
