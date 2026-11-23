@@ -76,7 +76,7 @@ public class OpenAiEmbeddingService : IEmbeddingService
         var configured = ReadConfigList("Gemini:ChatModels", "Gemini:ChatModel").ToList();
         if (configured.Count == 0)
         {
-            configured.AddRange(new[] { "gemini-3.8-flash", "gemini-3.5-flash-lite" });
+            configured.AddRange(new[] { "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite" });
         }
         return configured.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -458,95 +458,173 @@ public class OpenAiEmbeddingService : IEmbeddingService
         }
     }
 
+   private sealed class CloudProviderEntry
+    {
+        public string Name { get; set; } = "";
+        public string BaseUrl { get; set; } = "";
+        public string ApiKey { get; set; } = "";
+        public string ChatModel { get; set; } = "";
+    }
+
+    private List<CloudProviderEntry> GetConfiguredCloudProviders()
+    {
+        var list = _configuration.GetSection("CloudProviders").Get<List<CloudProviderEntry>>() ?? new();
+
+        // Tetap dukung konfigurasi lama "CloudLlm" sebagai cadangan
+        var legacyKey = _configuration["CloudLlm:ApiKey"]?.Trim();
+        if (!string.IsNullOrWhiteSpace(legacyKey))
+        {
+            list.Add(new CloudProviderEntry
+            {
+                Name = "CloudLlm-Legacy",
+                BaseUrl = _configuration["CloudLlm:BaseUrl"]?.Trim() ?? "https://openrouter.ai/api/v1",
+                ApiKey = legacyKey,
+                ChatModel = _configuration["CloudLlm:ChatModel"]?.Trim() ?? "openrouter/free"
+            });
+        }
+
+        return list
+            .Where(p => !string.IsNullOrWhiteSpace(p.BaseUrl) &&
+                        !string.IsNullOrWhiteSpace(p.ApiKey) &&
+                        !string.IsNullOrWhiteSpace(p.ChatModel))
+            .ToList();
+    }
+
     private async IAsyncEnumerable<string> StreamCloudLlmAsync(
         string systemPrompt,
         string userMessage,
         IEnumerable<ChatTurnDto>? history,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var apiKey = _configuration["CloudLlm:ApiKey"]?.Trim();
-        if (string.IsNullOrWhiteSpace(apiKey)) yield break;
+        var providers = GetConfiguredCloudProviders();
+        if (providers.Count == 0) yield break;
 
-        var baseUrl = (_configuration["CloudLlm:BaseUrl"]?.Trim() ?? "https://api.groq.com/openai/v1").TrimEnd('/');
-        var model = _configuration["CloudLlm:ChatModel"]?.Trim() ?? "llama-3.3-70b-versatile";
-
-        var payload = JsonSerializer.Serialize(new
+        foreach (var provider in providers)
         {
-            model,
-            messages = BuildStandardMessages(systemPrompt, userMessage, history),
-            stream = true,
-            temperature = 0.45,
-            top_p = 0.9,
-            max_tokens = 1024
-        });
+            var providerName = string.IsNullOrWhiteSpace(provider.Name) ? provider.ChatModel : provider.Name;
+            var baseUrl = provider.BaseUrl.Trim().TrimEnd('/');
+            var model = provider.ChatModel.Trim();
+            var apiKey = provider.ApiKey.Trim();
 
-        HttpResponseMessage? response = null;
-        try
-        {
-            var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/chat/completions")
+            if (!IsSlotAvailable(apiKey, $"{baseUrl}::{model}")) continue;
+
+            var payloadDict = new Dictionary<string, object>
             {
-                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+                ["model"] = model,
+                ["messages"] = BuildStandardMessages(systemPrompt, userMessage, history),
+                ["stream"] = true,
+                ["temperature"] = 0.45,
+                ["top_p"] = 0.9,
+                ["max_tokens"] = 1024
             };
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-            response = await _httpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (!response.IsSuccessStatusCode)
+            // Matikan mode thinking default agar TTFT < 1 detik di DeepSeek & Qwen Cloud
+            if (baseUrl.Contains("deepseek.com", StringComparison.OrdinalIgnoreCase))
+                payloadDict["thinking"] = new { type = "disabled" };
+            else if (baseUrl.Contains("aliyuncs.com", StringComparison.OrdinalIgnoreCase))
+                payloadDict["enable_thinking"] = false;
+
+            var payload = JsonSerializer.Serialize(payloadDict);
+            HttpResponseMessage? response = null;
+
+            try
+            {
+                using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                headerCts.CancelAfter(TimeSpan.FromSeconds(10));
+
+                var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/chat/completions")
+                {
+                    Content = new StringContent(payload, Encoding.UTF8, "application/json")
+                };
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+                if (baseUrl.Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase))
+                {
+                    req.Headers.TryAddWithoutValidation("HTTP-Referer", "https://jakhome.id");
+                    req.Headers.TryAddWithoutValidation("X-Title", "JakUrban AI");
+                }
+
+                response = await _httpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, headerCts.Token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var code = (int)response.StatusCode;
+                    var errBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    _logger.LogWarning("Provider {Name} ({Model}) merespons {Status}: {Err}", providerName, model, response.StatusCode, errBody);
+
+                    MarkSlotCooldown(apiKey, $"{baseUrl}::{model}", code switch
+                    {
+                        429 => 180,
+                        401 or 402 or 403 or 404 => 1800,
+                        _ => 45
+                    });
+
+                    response.Dispose();
+                    response = null;
+                    continue;
+                }
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Provider {Name} ({Model}) gagal/timeout ({Msg}). Lanjut vendor berikutnya...", providerName, model, ex.Message);
+                MarkSlotCooldown(apiKey, $"{baseUrl}::{model}", 45);
+                response?.Dispose();
+                response = null;
+                continue;
+            }
+
+            bool insideThinkBlock = false;
+            bool yieldedAny = false;
+            try
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var reader = new StreamReader(stream);
+
+                while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+                {
+                    var line = await reader.ReadLineAsync(cancellationToken);
+                    if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var data = line[5..].Trim();
+                    if (data == "[DONE]") break;
+
+                    string? chunk = null;
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(data);
+                        if (doc.RootElement.TryGetProperty("choices", out var choices) &&
+                            choices.GetArrayLength() > 0 &&
+                            choices[0].TryGetProperty("delta", out var delta) &&
+                            delta.TryGetProperty("content", out var contentElem))
+                        {
+                            chunk = contentElem.GetString();
+                        }
+                    }
+                    catch { continue; }
+
+                    if (!string.IsNullOrEmpty(chunk))
+                    {
+                        if (chunk.Contains("<think>", StringComparison.OrdinalIgnoreCase)) { insideThinkBlock = true; continue; }
+                        if (insideThinkBlock)
+                        {
+                            if (chunk.Contains("</think>", StringComparison.OrdinalIgnoreCase)) insideThinkBlock = false;
+                            continue;
+                        }
+                        yieldedAny = true;
+                        yield return chunk;
+                    }
+                }
+            }
+            finally
             {
                 response.Dispose();
+            }
+
+            if (yieldedAny)
+            {
+                _logger.LogInformation("Streaming selesai via {Name} ({Model}).", providerName, model);
                 yield break;
             }
-        }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            _logger.LogWarning("Koneksi stream CloudLlm gagal: {Msg}", ex.Message);
-            response?.Dispose();
-            yield break;
-        }
-
-        bool insideThinkBlock = false;
-        try
-        {
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var reader = new StreamReader(stream);
-
-            while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
-            {
-                var line = await reader.ReadLineAsync(cancellationToken);
-                if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var data = line[5..].Trim();
-                if (data == "[DONE]") break;
-
-                string? chunk = null;
-                try
-                {
-                    using var doc = JsonDocument.Parse(data);
-                    if (doc.RootElement.TryGetProperty("choices", out var choices) &&
-                        choices.GetArrayLength() > 0 &&
-                        choices[0].TryGetProperty("delta", out var delta) &&
-                        delta.TryGetProperty("content", out var contentElem))
-                    {
-                        chunk = contentElem.GetString();
-                    }
-                }
-                catch { continue; }
-
-                if (!string.IsNullOrEmpty(chunk))
-                {
-                    if (chunk.Contains("<think>", StringComparison.OrdinalIgnoreCase)) { insideThinkBlock = true; continue; }
-                    if (insideThinkBlock)
-                    {
-                        if (chunk.Contains("</think>", StringComparison.OrdinalIgnoreCase)) insideThinkBlock = false;
-                        continue;
-                    }
-                    yield return chunk;
-                }
-            }
-        }
-        finally
-        {
-            response.Dispose();
         }
     }
 
