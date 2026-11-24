@@ -17,6 +17,7 @@ import ProjectFormModal from '../components/dashboard/ProjectFormModal';
 import '../styles/dashboard.css';
 import KnowledgeBaseManager from '../components/dashboard/KnowledgeBaseManager';
 import { buildAgentReferralUrl, createAgentSlug, formatWaDisplay } from '../utils/i18n';
+import HomepageManager from '../components/dashboard/HomepageManager';
 
 const IconBase = (props) => (
   <svg
@@ -194,7 +195,7 @@ const SvgIcon = {
   )
 };
 
-const VALID_TABS = ['analytics', 'management', 'logs', 'team', 'knowledge'];
+const VALID_TABS = ['analytics', 'management', 'logs', 'team', 'knowledge', 'homepage'];
 const DEFAULT_ACCOUNT_FORM = {
   name: '',
   email: '',
@@ -773,6 +774,13 @@ export default function Dashboard(props) {
               <SvgIcon.Users />
               <span>Kelola Tim & Akses</span>
               <span class="nav-counter">{(props.accounts || []).length}</span>
+            </button>
+            <button
+              class={`nav-btn ${adminView() === 'homepage' ? 'active' : ''}`}
+              onClick={() => setAdminView('homepage')}
+            >
+              <SvgIcon.Globe />
+              <span>Kelola Homepage</span>
             </button>
           </Show>
 
@@ -1569,6 +1577,14 @@ export default function Dashboard(props) {
         </Show>
         <Show when={adminView() === 'knowledge' && isSuperAdmin()}>
           <KnowledgeBaseManager addActivityLog={props.addActivityLog} />
+        </Show>
+        <Show when={adminView() === 'homepage' && isSuperAdmin()}>
+          <HomepageManager
+            homepageConfig={props.homepageConfig}
+            onSaveConfig={props.onSaveHomepageConfig}
+            setView={props.setView}
+            addActivityLog={props.addActivityLog}
+          />
         </Show>
       </main>
 

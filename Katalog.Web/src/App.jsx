@@ -15,6 +15,12 @@ import { apiService, computeProjectSummary } from './services/api';
 import TrustHeroSlides from './components/catalog/TrustHeroSlides';
 import ModernShowcaseSection from './components/catalog/ModernShowcaseSection';
 import { captureAgentFromUrl, t } from './utils/i18n';
+import PromoPopup from './components/catalog/PromoPopup';
+import {
+  DEFAULT_HOMEPAGE_CONFIG,
+  HOMEPAGE_STORAGE_KEY,
+  mergeHomepageConfig
+} from './constants/homepageDefault';
 
 const DEFAULT_ACCOUNTS = [
   {
@@ -241,11 +247,25 @@ function App() {
   const [accounts, updateAccounts] = createStoredSignal('jakurban_accounts', DEFAULT_ACCOUNTS);
   const [activityLogs, setActivityLogs] = createStoredSignal('jakurban_activity_logs', DEFAULT_LOGS);
   const [analytics, saveAnalytics] = createStoredSignal('jakurban_analytics', DEFAULT_ANALYTICS);
+  const [homepageConfig, setHomepageConfig] = createStoredSignal(
+    HOMEPAGE_STORAGE_KEY,
+    DEFAULT_HOMEPAGE_CONFIG
+  );
+  const handleSaveHomepageConfig = async (nextConfig) => {
+    const merged = mergeHomepageConfig(nextConfig);
+    setHomepageConfig(merged);
+    try {
+      await apiService.saveSiteConfig?.(merged);
+    } catch (err) {
+      console.warn('Konfigurasi homepage tersimpan lokal:', err.message);
+    }
+  };
   const [view, setViewStorage] = createStoredSignal('jakurban_active_view', 'catalog');
   const [selectedPropertyId, setSelectedPropertyId] = createStoredSignal('jakurban_selected_property_id', null, { removeWhenNull: true });
   const [selectedUnitId, setSelectedUnitId] = createStoredSignal('jakurban_selected_unit_id', null, { removeWhenNull: true });
 
   const [showLogin, setShowLogin] = createSignal(false);
+  const [loginError, setLoginError] = createSignal('');
   const [showLogoutModal, setShowLogoutModal] = createSignal(false);
   const [loginForm, setLoginForm] = createStore({ email: '', password: '' });
   const [clusters, setClustersState] = createSignal(
@@ -532,6 +552,15 @@ function App() {
     } catch {
       // Gunakan daftar akun lokal jika endpoint accounts belum terjangkau
     }
+
+    try {
+      const serverConfig = await apiService.getSiteConfig?.();
+      if (serverConfig) {
+        setHomepageConfig(mergeHomepageConfig(serverConfig));
+      }
+    } catch {
+      // Gunakan konfigurasi lokal jika endpoint site-config belum tersedia
+    }
   });
 
   const addActivityLog = ({ action, category = 'PROJECT', target, details }, actorOverride = null) => {
@@ -658,6 +687,7 @@ function App() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    setLoginError('');
     const emailInput = (loginForm.email || '').trim().toLowerCase();
     const passInput = (loginForm.password || '').trim();
 
@@ -667,6 +697,7 @@ function App() {
       setCurrentUser(loggedInAccount);
       setUser(loggedInAccount.role);
       setShowLogin(false);
+      setLoginError('');
       addActivityLog(
         {
           action: 'LOGIN',
@@ -680,13 +711,13 @@ function App() {
       );
       setView('dashboard');
     } catch (err) {
-      // Jika server eksplisit menolak karena email/password salah (HTTP 401)
+      // Server menolak karena password tidak sesuai (HTTP 401)
       if (err.status === 401) {
-        alert(err.message);
+        setLoginError(t('loginPasswordInvalid'));
         return;
       }
 
-      // Fallback otomatis jika Render sedang deploy / cold-start
+      // Fallback lokal jika server Render sedang cold-start / offline
       const matchedAccount = accounts().find(
         (acc) => acc.email.toLowerCase() === emailInput && acc.password === passInput
       );
@@ -699,6 +730,7 @@ function App() {
         setCurrentUser(accountWithToken);
         setUser(accountWithToken.role);
         setShowLogin(false);
+        setLoginError('');
         addActivityLog(
           {
             action: 'LOGIN',
@@ -712,9 +744,22 @@ function App() {
         );
         setView('dashboard');
       } else {
-        alert('Kredensial tidak valid. Pastikan email dan password sesuai dengan yang terdaftar.');
+        setLoginError(t('loginPasswordInvalid'));
       }
     }
+  };
+
+  // Tambahkan helper ini di dekat handleLogin di src/App.jsx:
+  const handleOpenLogin = () => {
+    setLoginError('');
+    setShowLogin(true);
+    apiService.getAccounts?.()
+      .then((serverAccounts) => {
+        if (Array.isArray(serverAccounts) && serverAccounts.length > 0) {
+          updateAccounts(serverAccounts);
+        }
+      })
+      .catch(() => {});
   };
 
   // Buka Pop-Up Modal Logout
@@ -755,14 +800,14 @@ function App() {
           view={view()}
           setView={setView}
           user={user()}
-          onLoginClick={() => setShowLogin(true)}
+          onLoginClick={handleOpenLogin}
           onLogout={handleLogout}
         />
       </Show>
 
       <main>
         <Show when={view() === 'catalog'}>
-          <Hero onSearch={handleSearch} />
+          <Hero onSearch={handleSearch} heroConfig={homepageConfig().hero} />
           <div class="container">
             <div class="section-header">
               <div class="section-title">
@@ -810,8 +855,8 @@ function App() {
               </div>
             </Show>
           </div>
-          <TrustHeroSlides />
-          <ModernShowcaseSection />
+          <TrustHeroSlides slides={homepageConfig().carouselSlides} />
+          <ModernShowcaseSection showcase={homepageConfig().showcase} />
         </Show>
 
         <Show when={view() === 'detail' && selectedProperty()}>
@@ -852,6 +897,8 @@ function App() {
             activityLogs={activityLogs()}
             addActivityLog={addActivityLog}
             analytics={analytics()}
+            homepageConfig={homepageConfig()}
+            onSaveHomepageConfig={handleSaveHomepageConfig}
             onLogout={handleLogout}
           />
         </Show>
@@ -889,9 +936,22 @@ function App() {
 
       <LoginModal
         isOpen={showLogin()}
-        onClose={() => setShowLogin(false)}
+        onClose={() => {
+          setShowLogin(false);
+          setLoginError('');
+        }}
         onSubmit={handleLogin}
         setLoginForm={setLoginForm}
+        registeredEmails={(accounts() || []).map((acc) => acc.email)}
+        passwordError={loginError()}
+        onClearPasswordError={() => setLoginError('')}
+      />
+
+      <PromoPopup
+        config={homepageConfig().popup}
+        view={view()}
+        isAdmin={isAdmin()}
+        onOpenChat={() => setView('chatbot')}
       />
 
       {/* POP-UP MODAL KONFIRMASI LOGOUT */}

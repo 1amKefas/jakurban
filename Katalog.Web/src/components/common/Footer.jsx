@@ -16,7 +16,8 @@ const LINK_SECTIONS = [
 const SOCIALS = [
   { name: 'Instagram', href: 'https://www.instagram.com/jakurban62/', icon: () => <Icons.Instagram /> },
   { name: 'TikTok', href: 'https://www.tiktok.com/@jakurban62', icon: () => <Icons.TikTok /> },
-  { name: 'Facebook', href: 'https://www.facebook.com/jakurban62', icon: () => <Icons.Facebook /> }
+  { name: 'Facebook', href: 'https://www.facebook.com/jakurban62', icon: () => <Icons.Facebook /> },
+  { name: 'Threads', href: 'https://www.threads.net/@jakurban62', icon: () => <Icons.Threads /> }
 ];
 
 export default function Footer() {
@@ -78,10 +79,6 @@ export default function Footer() {
 
         <div class="footer-bottom">
           <div>© 2026 JakHome. All rights reserved.</div>
-          <div class="footer-lang-tags">
-            <span>ID</span>
-            <span>EN</span>
-          </div>
         </div>
       </div>
     </footer>

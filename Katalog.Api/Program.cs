@@ -8,6 +8,8 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -173,6 +175,12 @@ using (var scope = app.Services.CreateScope())
                 ""FileName"" text NOT NULL DEFAULT '',
                 ""Content"" text NOT NULL DEFAULT '',
                 ""CreatedAt"" text NOT NULL DEFAULT ''
+            );
+            
+            CREATE TABLE IF NOT EXISTS ""SiteConfigs"" (
+                ""Key"" text PRIMARY KEY,
+                ""ConfigJson"" text NOT NULL DEFAULT '{}',
+                ""UpdatedAt"" timestamp with time zone NOT NULL DEFAULT NOW()
             );
 
             INSERT INTO ""UserAccounts"" (""Id"", ""Name"", ""Email"", ""Password"", ""Phone"", ""Slug"", ""Role"", ""Title"", ""CreatedAt"")
@@ -458,6 +466,73 @@ app.MapDelete("/api/auth/accounts/{id}", async (ApplicationDbContext db, string 
         Console.WriteLine($"[DELETE /api/auth/accounts Warning]: {ex.Message}");
     }
     return Results.NoContent();
+});
+
+const string SiteConfigCacheKey = "jakurban_site_config_homepage";
+
+// GET: /api/site-config (Cek RAM cache dulu agar instan & hemat kuota Neon)
+app.MapGet("/api/site-config", async (ApplicationDbContext db, IMemoryCache cache) =>
+{
+    if (cache.TryGetValue(SiteConfigCacheKey, out string? cachedJson) && !string.IsNullOrWhiteSpace(cachedJson))
+    {
+        return Results.Content(cachedJson, "application/json; charset=utf-8");
+    }
+
+    try
+    {
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"SELECT ""ConfigJson"" FROM ""SiteConfigs"" WHERE ""Key"" = 'homepage' LIMIT 1;";
+        var rawJson = (await cmd.ExecuteScalarAsync())?.ToString();
+
+        var resolvedJson = string.IsNullOrWhiteSpace(rawJson) ? "null" : rawJson!;
+        cache.Set(SiteConfigCacheKey, resolvedJson, TimeSpan.FromHours(6));
+
+        return Results.Content(resolvedJson, "application/json; charset=utf-8");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[GET /api/site-config Warning]: {ex.Message}");
+        return Results.Content("null", "application/json; charset=utf-8");
+    }
+});
+
+// PUT: /api/site-config (Simpan konfigurasi Homepage & Billboard dari Super Admin ke PostgreSQL + perbarui cache RAM)
+app.MapPut("/api/site-config", async (ApplicationDbContext db, IMemoryCache cache, JsonElement payload) =>
+{
+    if (payload.ValueKind != JsonValueKind.Object)
+    {
+        return Results.BadRequest(new { message = "Payload konfigurasi homepage harus berupa objek JSON." });
+    }
+
+    var jsonStr = payload.GetRawText();
+
+    try
+    {
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO ""SiteConfigs"" (""Key"", ""ConfigJson"", ""UpdatedAt"")
+            VALUES ('homepage', @json, @now)
+            ON CONFLICT (""Key"") DO UPDATE SET
+                ""ConfigJson"" = EXCLUDED.""ConfigJson"",
+                ""UpdatedAt"" = EXCLUDED.""UpdatedAt"";";
+        AddParam(cmd, "@json", jsonStr);
+        AddParam(cmd, "@now", DateTime.UtcNow);
+        await cmd.ExecuteNonQueryAsync();
+
+        cache.Set(SiteConfigCacheKey, jsonStr, TimeSpan.FromHours(6));
+        return Results.Content(jsonStr, "application/json; charset=utf-8");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[PUT /api/site-config Error]: {ex.Message}");
+        return Results.Json(new { message = "Gagal menyimpan konfigurasi homepage ke database." }, statusCode: 503);
+    }
 });
 
 app.MapControllers();

@@ -132,7 +132,7 @@ const DICT = {
   id: {
     navCatalog: 'Katalog',
     navDashboard: 'Dashboard',
-    navSignIn: 'Masuk',
+    navSignIn: 'Portal Agen',
     navSignOut: 'Keluar',
     heroTitle: 'Temukan Hunian Modern Impian Anda di Jakarta',
     heroSubtitle: 'Katalog resmi terpusat dengan asisten AI pintar 24/7 untuk membantu Anda memilih properti dan simulasi KPR secara akurat.',
@@ -179,7 +179,6 @@ const DICT = {
     mapHeadingUnit: 'Lokasi Unit & Kawasan',
     openInGmaps: 'Buka di Google Maps',
     contactUs: 'Hubungi Kami',
-    activeAgentLabel: 'Agen Pemasaran Resmi:',
     askJakBtn: 'Tanya Jak (AI)',
     askKprBtn: 'Tanya AI Simulasi KPR',
     kprTitle: 'Simulasi KPR',
@@ -202,12 +201,26 @@ const DICT = {
     logoutConfirmTitle: 'Konfirmasi Keluar Sesi',
     logoutConfirmDesc: 'Apakah Anda yakin ingin keluar?',
     cancelBtn: 'Batal',
-    confirmLogoutBtn: 'Ya, Keluar Sesi'
+    confirmLogoutBtn: 'Ya, Keluar Sesi',
+    loginModalClose: 'Tutup',
+    loginTitle: 'Portal Agen & Admin',
+    loginSubtitle: 'Masuk menggunakan kredensial resmi agen atau administrator terdaftar.',
+    loginEmailLabel: 'Email Resmi',
+    loginEmailPlaceholder: 'nama@jakurban.com',
+    loginEmailInvalid: 'Gunakan format email valid (contoh: nama@jakurban.com)',
+    loginEmailNotFound: 'Email ini tidak terdaftar sebagai agen atau administrator.',
+    loginEmailValid: 'Format email valid',
+    loginPasswordLabel: 'Kata Sandi',
+    loginPasswordLocked: 'Masukkan email valid terlebih dahulu',
+    loginPasswordPlaceholder: 'Masukkan kata sandi',
+    loginPasswordInvalid: 'Kata sandi tidak sesuai. Silakan periksa kembali.',
+    loginSubmitBtn: 'Masuk ke Dashboard',
+    loginPublicNote: 'Pengunjung umum tidak perlu masuk untuk melihat katalog atau berkonsultasi.'
   },
   en: {
     navCatalog: 'Catalog',
     navDashboard: 'Dashboard',
-    navSignIn: 'Log In',
+    navSignIn: 'Agent Portal',
     navSignOut: 'Log Out',
     heroTitle: 'Discover Your Dream Modern Home in Jakarta',
     heroSubtitle: 'Official centralized property catalog powered by a 24/7 RAG AI Assistant for instant unit specs and mortgage simulations.',
@@ -277,7 +290,21 @@ const DICT = {
     logoutConfirmTitle: 'Confirm Sign Out',
     logoutConfirmDesc: 'Are you sure you want to sign out?',
     cancelBtn: 'Cancel',
-    confirmLogoutBtn: 'Yes, Sign Out'
+    confirmLogoutBtn: 'Yes, Sign Out',
+    loginModalClose: 'Close',
+    loginTitle: 'Agent & Admin Portal',
+    loginSubtitle: 'Sign in with your authorized agent or administrator credentials.',
+    loginEmailLabel: 'Work Email',
+    loginEmailPlaceholder: 'name@jakurban.com',
+    loginEmailInvalid: 'Enter a valid email address (e.g. name@jakurban.com)',
+    loginEmailNotFound: 'This email is not registered as an agent or administrator.',
+    loginEmailValid: 'Valid email format',
+    loginPasswordLabel: 'Password',
+    loginPasswordLocked: 'Enter a valid email first to unlock',
+    loginPasswordPlaceholder: 'Enter your password',
+    loginPasswordInvalid: 'Incorrect password. Please check and try again.',
+    loginSubmitBtn: 'Sign In to Dashboard', 
+    loginPublicNote: 'Public visitors do not need an account to browse listings or consult.'
   }
 };
 

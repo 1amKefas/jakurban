@@ -686,5 +686,23 @@ export const apiService = {
       errorPrefix: 'Gagal menghapus akun'
     });
     return true;
+  },
+
+  /** Mengambil konfigurasi konten Homepage (Hero Billboard, Pop-Up, Carousel, Showcase). */
+  async getSiteConfig() {
+    const res = await requestApi('/site-config', {
+      errorPrefix: 'Gagal memuat konfigurasi homepage'
+    });
+    return await res.json();
+  },
+
+  /** Menyimpan konfigurasi konten Homepage dari Dashboard Super Admin. */
+  async saveSiteConfig(configPayload) {
+    const res = await requestApi('/site-config', {
+      method: 'PUT',
+      body: configPayload,
+      errorPrefix: 'Gagal menyimpan konfigurasi homepage'
+    });
+    return await res.json();
   }
 };    
