@@ -688,21 +688,23 @@ export const apiService = {
     return true;
   },
 
-  /** Mengambil konfigurasi konten Homepage (Hero Billboard, Pop-Up, Carousel, Showcase). */
+  /** Mengambil konfigurasi konten Homepage (selalu fresh tanpa HTTP cache). */
   async getSiteConfig() {
-    const res = await requestApi('/site-config', {
-      errorPrefix: 'Gagal memuat konfigurasi homepage'
+    const res = await fetch(`${API_BASE_URL}/site-config?t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store'
     });
+    if (!res.ok) throw new Error(`Gagal memuat konfigurasi homepage (${res.status})`);
     return await res.json();
   },
 
-  /** Menyimpan konfigurasi konten Homepage dari Dashboard Super Admin. */
+  /** Menyimpan konfigurasi konten Homepage dari Dashboard Super Admin ke PostgreSQL. */
   async saveSiteConfig(configPayload) {
     const res = await requestApi('/site-config', {
       method: 'PUT',
       body: configPayload,
-      errorPrefix: 'Gagal menyimpan konfigurasi homepage'
+      errorPrefix: 'Gagal menyimpan konfigurasi homepage ke server',
+      detailedError: true
     });
     return await res.json();
   }
-};    

@@ -17,6 +17,8 @@ export default function HomepageManager(props) {
   const [subTab, setSubTab] = createSignal('hero');
   const [draft, setDraft] = createSignal(mergeHomepageConfig(props.homepageConfig));
   const [saveNotice, setSaveNotice] = createSignal('');
+  const [saveError, setSaveError] = createSignal('');
+  const [isSaving, setIsSaving] = createSignal(false);
   const [uploadingKey, setUploadingKey] = createSignal('');
   const [previewBillboardIdx, setPreviewBillboardIdx] = createSignal(0);
   const [activeSlideIdx, setActiveSlideIdx] = createSignal(0);
@@ -48,9 +50,11 @@ export default function HomepageManager(props) {
 
   const handleSaveAll = async (e) => {
     e?.preventDefault();
-    const cleanData = structuredClone(draft());
+    setSaveNotice('');
+    setSaveError('');
+    setIsSaving(true);
 
-    // Normalisasi seluruh link Google Drive sebelum disimpan
+    const cleanData = structuredClone(draft());
     cleanData.hero.billboards = (cleanData.hero.billboards || []).map((b) => ({
       ...b,
       imageUrl: normalizeDriveImageUrl(b.imageUrl)
@@ -64,20 +68,28 @@ export default function HomepageManager(props) {
       }))
     }));
 
-    await props.onSaveConfig?.(cleanData);
+    try {
+      await props.onSaveConfig?.(cleanData);
 
-    const activeBillboardCount = cleanData.hero.billboards.filter((b) => b.imageUrl).length;
-    props.addActivityLog?.({
-      action: 'UPDATE',
-      category: 'HOMEPAGE',
-      target: 'Konten Homepage & Billboard',
-      details: `Memperbarui homepage (${activeBillboardCount} billboard hero, ${cleanData.carouselSlides.length} slide rekam jejak, Pop-Up ${
-        cleanData.popup.enabled ? 'Aktif' : 'Nonaktif'
-      })`
-    });
+      const activeBillboardCount = cleanData.hero.billboards.filter((b) => b.imageUrl).length;
+      props.addActivityLog?.({
+        action: 'UPDATE',
+        category: 'HOMEPAGE',
+        target: 'Konten Homepage & Billboard',
+        details: `Memperbarui homepage (${activeBillboardCount} billboard hero, ${cleanData.carouselSlides.length} slide rekam jejak, Pop-Up ${
+          cleanData.popup.enabled ? 'Aktif' : 'Nonaktif'
+        })`
+      });
 
-    setSaveNotice('Perubahan Homepage berhasil disimpan & dipublikasikan.');
-    setTimeout(() => setSaveNotice(''), 3500);
+      setSaveNotice('Berhasil disimpan ke server! Semua pengunjung & perangkat sekarang melihat versi terbaru.');
+      setTimeout(() => setSaveNotice(''), 4000);
+    } catch (err) {
+      setSaveError(
+        `Hanya tersimpan di browser ini — GAGAL sinkron ke server (${err.message}). Pastikan backend Render sudah selesai deploy.`
+      );
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleResetDefault = () => {
@@ -213,14 +225,19 @@ export default function HomepageManager(props) {
           <button type="button" class="btn-ghost" onClick={() => props.setView?.('catalog')}>
             Pratinjau Penuh
           </button>
-          <button type="button" class="btn-primary" onClick={handleSaveAll}>
-            Simpan & Publikasikan
+          <button type="button" class="btn-primary" onClick={handleSaveAll} disabled={isSaving()}>
+            {isSaving() ? 'Menyimpan...' : 'Simpan & Publikasikan'}
           </button>
         </div>
       </div>
 
       <Show when={saveNotice()}>
         <div class="cms-save-toast">{saveNotice()}</div>
+      </Show>
+      <Show when={saveError()}>
+        <div class="cms-save-toast" style={{ background: '#fee2e2', color: '#991b1b', 'border-color': '#fecaca' }}>
+          {saveError()}
+        </div>
       </Show>
 
       <div class="log-filter-pills cms-subtabs">

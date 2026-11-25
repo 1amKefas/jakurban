@@ -254,11 +254,7 @@ function App() {
   const handleSaveHomepageConfig = async (nextConfig) => {
     const merged = mergeHomepageConfig(nextConfig);
     setHomepageConfig(merged);
-    try {
-      await apiService.saveSiteConfig?.(merged);
-    } catch (err) {
-      console.warn('Konfigurasi homepage tersimpan lokal:', err.message);
-    }
+    await apiService.saveSiteConfig(merged);
   };
   const [view, setViewStorage] = createStoredSignal('jakurban_active_view', 'catalog');
   const [selectedPropertyId, setSelectedPropertyId] = createStoredSignal('jakurban_selected_property_id', null, { removeWhenNull: true });
@@ -474,6 +470,12 @@ function App() {
         setUser(updatedUser?.role ?? null);
         if (!updatedUser && view() === 'dashboard') {
           setView('catalog');
+        }
+      } else if (e.key === HOMEPAGE_STORAGE_KEY && e.newValue) {
+        try {
+          setHomepageConfig(mergeHomepageConfig(JSON.parse(e.newValue)));
+        } catch {
+          // Abaikan jika JSON rusak
         }
       }
     };

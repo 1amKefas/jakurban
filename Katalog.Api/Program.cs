@@ -470,10 +470,14 @@ app.MapDelete("/api/auth/accounts/{id}", async (ApplicationDbContext db, string 
 
 const string SiteConfigCacheKey = "jakurban_site_config_homepage";
 
-// GET: /api/site-config (Cek RAM cache dulu agar instan & hemat kuota Neon)
-app.MapGet("/api/site-config", async (ApplicationDbContext db, IMemoryCache cache) =>
+// GET: /api/site-config
+app.MapGet("/api/site-config", async (ApplicationDbContext db, IMemoryCache cache, HttpResponse response) =>
 {
-    if (cache.TryGetValue(SiteConfigCacheKey, out string? cachedJson) && !string.IsNullOrWhiteSpace(cachedJson))
+    response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+
+    if (cache.TryGetValue(SiteConfigCacheKey, out string? cachedJson) &&
+        !string.IsNullOrWhiteSpace(cachedJson) &&
+        cachedJson != "null")
     {
         return Results.Content(cachedJson, "application/json; charset=utf-8");
     }
@@ -483,14 +487,26 @@ app.MapGet("/api/site-config", async (ApplicationDbContext db, IMemoryCache cach
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
+        using var ensureCmd = conn.CreateCommand();
+        ensureCmd.CommandText = @"
+            CREATE TABLE IF NOT EXISTS ""SiteConfigs"" (
+                ""Key"" text PRIMARY KEY,
+                ""ConfigJson"" text NOT NULL DEFAULT '{}',
+                ""UpdatedAt"" timestamp with time zone NOT NULL DEFAULT NOW()
+            );";
+        await ensureCmd.ExecuteNonQueryAsync();
+
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"SELECT ""ConfigJson"" FROM ""SiteConfigs"" WHERE ""Key"" = 'homepage' LIMIT 1;";
         var rawJson = (await cmd.ExecuteScalarAsync())?.ToString();
 
-        var resolvedJson = string.IsNullOrWhiteSpace(rawJson) ? "null" : rawJson!;
-        cache.Set(SiteConfigCacheKey, resolvedJson, TimeSpan.FromHours(6));
+        if (!string.IsNullOrWhiteSpace(rawJson) && rawJson != "null")
+        {
+            cache.Set(SiteConfigCacheKey, rawJson, TimeSpan.FromMinutes(30));
+            return Results.Content(rawJson, "application/json; charset=utf-8");
+        }
 
-        return Results.Content(resolvedJson, "application/json; charset=utf-8");
+        return Results.Content("null", "application/json; charset=utf-8");
     }
     catch (Exception ex)
     {
@@ -499,20 +515,37 @@ app.MapGet("/api/site-config", async (ApplicationDbContext db, IMemoryCache cach
     }
 });
 
-// PUT: /api/site-config (Simpan konfigurasi Homepage & Billboard dari Super Admin ke PostgreSQL + perbarui cache RAM)
-app.MapPut("/api/site-config", async (ApplicationDbContext db, IMemoryCache cache, JsonElement payload) =>
+// PUT: /api/site-config
+app.MapPut("/api/site-config", async (ApplicationDbContext db, IMemoryCache cache, HttpRequest request) =>
 {
-    if (payload.ValueKind != JsonValueKind.Object)
+    string jsonStr;
+    try
     {
-        return Results.BadRequest(new { message = "Payload konfigurasi homepage harus berupa objek JSON." });
+        using var doc = await JsonDocument.ParseAsync(request.Body);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            return Results.BadRequest(new { message = "Payload konfigurasi homepage harus berupa objek JSON." });
+        }
+        jsonStr = doc.RootElement.GetRawText();
     }
-
-    var jsonStr = payload.GetRawText();
+    catch
+    {
+        return Results.BadRequest(new { message = "Format JSON konfigurasi homepage tidak valid." });
+    }
 
     try
     {
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+        using var ensureCmd = conn.CreateCommand();
+        ensureCmd.CommandText = @"
+            CREATE TABLE IF NOT EXISTS ""SiteConfigs"" (
+                ""Key"" text PRIMARY KEY,
+                ""ConfigJson"" text NOT NULL DEFAULT '{}',
+                ""UpdatedAt"" timestamp with time zone NOT NULL DEFAULT NOW()
+            );";
+        await ensureCmd.ExecuteNonQueryAsync();
 
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
@@ -525,13 +558,13 @@ app.MapPut("/api/site-config", async (ApplicationDbContext db, IMemoryCache cach
         AddParam(cmd, "@now", DateTime.UtcNow);
         await cmd.ExecuteNonQueryAsync();
 
-        cache.Set(SiteConfigCacheKey, jsonStr, TimeSpan.FromHours(6));
+        cache.Set(SiteConfigCacheKey, jsonStr, TimeSpan.FromMinutes(30));
         return Results.Content(jsonStr, "application/json; charset=utf-8");
     }
     catch (Exception ex)
     {
         Console.WriteLine($"[PUT /api/site-config Error]: {ex.Message}");
-        return Results.Json(new { message = "Gagal menyimpan konfigurasi homepage ke database." }, statusCode: 503);
+        return Results.Json(new { message = $"Gagal menyimpan konfigurasi homepage: {ex.Message}" }, statusCode: 503);
     }
 });
 
