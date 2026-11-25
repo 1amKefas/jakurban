@@ -542,7 +542,7 @@ app.MapPut("/api/site-config", async (ApplicationDbContext db, IMemoryCache cach
         ensureCmd.CommandText = @"
             CREATE TABLE IF NOT EXISTS ""SiteConfigs"" (
                 ""Key"" text PRIMARY KEY,
-                ""ConfigJson"" text NOT NULL DEFAULT '{}',
+                ""ConfigJson"" text NOT NULL DEFAULT '',
                 ""UpdatedAt"" timestamp with time zone NOT NULL DEFAULT NOW()
             );";
         await ensureCmd.ExecuteNonQueryAsync();
